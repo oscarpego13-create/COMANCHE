@@ -1,78 +1,67 @@
-name: Build COMANCHE VST3
+name: Build COMANCHE (macOS)
 
 on:
   push:
-    branches: [main, master]
-    tags: ['v*']
+    branches: [ main, master ]
   pull_request:
-    branches: [main, master]
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            artifact_name: COMANCHE-macOS
-            vst3_path: build/COMANCHE_artefacts/Release/VST3/COMANCHE.vst3
-          - os: windows-latest
-            artifact_name: COMANCHE-Windows
-            vst3_path: build/COMANCHE_artefacts/Release/VST3/COMANCHE.vst3
-
-    runs-on: ${{ matrix.os }}
+    name: macOS VST3
+    runs-on: macos-14
 
     steps:
-      - name: Checkout repository with submodules
+      - name: Checkout COMANCHE
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Clone iPlug2
+        run: |
+          git clone --depth=1 https://github.com/iPlug2/iPlug2.git ../iPlug2
+          cd ../iPlug2
+          git submodule update --init --recursive --depth=1
+
+      - name: Download IPlug SDKs (VST3)
+        run: |
+          cd ../iPlug2/Dependencies/IPlug
+          chmod +x download-iplug-sdks.sh
+          ./download-iplug-sdks.sh
+
+      - name: Copy font
+        run: |
+          mkdir -p resources/fonts
+          cp ../iPlug2/Examples/IPlugEffect/resources/fonts/Roboto-Regular.ttf \
+             resources/fonts/Roboto-Mono-Regular.ttf
 
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -B build -G Xcode \
+            -DIPLUG2_DIR=${{ github.workspace }}/../iPlug2 \
+            -DIGRAPHICS_BACKEND=NANOVG \
+            -DIGRAPHICS_RENDERER=METAL \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15 \
+            "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" \
+            -DIPLUG2_DISABLE_DEPRECATION_WARNINGS=ON \
+            -DIPLUG_DEPLOY_PLUGINS=OFF
 
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Build VST3
+        run: cmake --build build --config Release --target COMANCHE-vst3
 
-      - name: Remove macOS quarantine
-        if: runner.os == 'macOS'
-        run: xattr -cr "${{ matrix.vst3_path }}"
+      - name: Show build output
+        if: always()
+        run: find build -name "*.vst3" 2>/dev/null | head -20 || echo "no vst3 found"
 
-      - name: Upload VST3 artifact
+      - name: Collect artifact
+        run: |
+          mkdir -p dist
+          find build -name "*.vst3" -exec cp -r {} dist/ \; 2>/dev/null || true
+          ls -la dist/
+
+      - name: Upload VST3
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.vst3_path }}
-          if-no-files-found: error
-
-  release:
-    name: Create GitHub Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: COMANCHE-macOS
-          path: release/macOS
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: COMANCHE-Windows
-          path: release/Windows
-
-      - name: Zip artifacts
-        run: |
-          cd release/macOS && zip -r ../../COMANCHE-macOS.zip . && cd ../..
-          cd release/Windows && zip -r ../../COMANCHE-Windows.zip . && cd ../..
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            COMANCHE-macOS.zip
-            COMANCHE-Windows.zip
-          generate_release_notes: true
+          name: COMANCHE-VST3-macOS
+          path: dist/*.vst3
+          if-no-files-found: warn
+          retention-days: 30

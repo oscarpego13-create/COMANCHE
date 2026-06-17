@@ -1,0 +1,198 @@
+#include "EffectsChain.h"
+
+static constexpr float kTwoPiF = 6.28318530718f;
+static constexpr double kTwoPi = 6.28318530717958647;
+
+// ─── Biquad ──────────────────────────────────────────────────────────────────
+
+Biquad Biquad::makeHP(double sr, float freq)
+{
+    freq = std::clamp(freq, 10.0f, (float)(sr * 0.49));
+    double w0    = kTwoPi * freq / sr;
+    double cos0  = std::cos(w0), sin0 = std::sin(w0);
+    double alpha = sin0 / std::sqrt(2.0);
+    double inv   = 1.0 / (1.0 + alpha);
+    Biquad f;
+    f.b0 = (float)(( (1.0+cos0)*0.5) * inv);
+    f.b1 = (float)(( -(1.0+cos0))    * inv);
+    f.b2 = f.b0;
+    f.a1 = (float)((-2.0*cos0)       * inv);
+    f.a2 = (float)((1.0-alpha)       * inv);
+    return f;
+}
+
+Biquad Biquad::makeLP(double sr, float freq)
+{
+    freq = std::clamp(freq, 10.0f, (float)(sr * 0.49));
+    double w0    = kTwoPi * freq / sr;
+    double cos0  = std::cos(w0), sin0 = std::sin(w0);
+    double alpha = sin0 / std::sqrt(2.0);
+    double inv   = 1.0 / (1.0 + alpha);
+    Biquad f;
+    f.b0 = (float)(((1.0-cos0)*0.5) * inv);
+    f.b1 = (float)(( (1.0-cos0))    * inv);
+    f.b2 = f.b0;
+    f.a1 = (float)((-2.0*cos0)      * inv);
+    f.a2 = (float)((1.0-alpha)      * inv);
+    return f;
+}
+
+// ─── ComanacheReverb (Freeverb) ──────────────────────────────────────────────
+
+void ComanacheReverb::prepare(double sampleRate)
+{
+    const float sc = (float)(sampleRate / 44100.0);
+    const int cL[kN] = {1116,1188,1277,1356,1422,1491,1557,1617};
+    const int cR[kN] = {1139,1211,1300,1379,1445,1514,1580,1640};
+    const int aL[kA] = {556,441,341,225};
+    const int aR[kA] = {579,464,364,248};
+    for (int i=0;i<kN;i++){combL[i].resize((int)(cL[i]*sc));combR[i].resize((int)(cR[i]*sc));}
+    for (int i=0;i<kA;i++){apL[i].resize((int)(aL[i]*sc));  apR[i].resize((int)(aR[i]*sc));}
+}
+
+void ComanacheReverb::process(float* L, float* R, int n, float amount)
+{
+    if (amount <= 0.0f) return;
+    const float fb   = 0.50f;   // plate character: moderate room size
+    const float damp = 0.40f;   // moderate damping
+    const float wet  = amount;
+    const float dry  = 1.0f - amount;
+
+    for (int i = 0; i < n; i++) {
+        float inL = L[i], inR = R[i];
+        float input = (inL + inR) * 0.015f;
+        float oL=0, oR=0;
+        for (int j=0;j<kN;j++) { oL+=combL[j].process(input,fb,damp); oR+=combR[j].process(input,fb,damp); }
+        for (int j=0;j<kA;j++) { oL=apL[j].process(oL); oR=apR[j].process(oR); }
+        L[i] = inL*dry + oL*wet;
+        R[i] = inR*dry + oR*wet;
+    }
+}
+
+// ─── EffectsChain ────────────────────────────────────────────────────────────
+
+void EffectsChain::prepare(double sampleRate, int)
+{
+    sr = sampleRate;
+    reverb.prepare(sr);
+
+    delSize = (int)(sr * kMaxDelaySec) + 4096;
+    delBufL.assign(delSize, 0.0f);
+    delBufR.assign(delSize, 0.0f);
+    delPos = 0;
+
+    choSize = (int)(sr * 1);
+    choBufL.assign(choSize, 0.0f);
+    choBufR.assign(choSize, 0.0f);
+    choPos = 0; choPhase = 0.0f;
+
+    dlcL.reset(); dlcR.reset(); dhcL.reset(); dhcR.reset();
+    hpL.reset();  hpR.reset();  lpL.reset();  lpR.reset();
+    lastDlcFreq=lastDhcFreq=lastHpFreq=lastLpFreq=-1;
+}
+
+void EffectsChain::setParameters(const EffectsParameters& p) { params = p; }
+
+float EffectsChain::readBuf(const std::vector<float>& b, int wp, float delay) const
+{
+    const int sz = (int)b.size();
+    float rp = (float)wp - delay;
+    while (rp < 0) rp += sz;
+    int i0 = (int)rp % sz, i1 = (i0+1) % sz;
+    float f = rp - (int)rp;
+    return b[i0] + f*(b[i1]-b[i0]);
+}
+
+float EffectsChain::delayTimeSamples() const
+{
+    if (params.delaySyncMode == 0) return params.delayTimeMs * 0.001f * (float)sr;
+    double bps = params.bpm / 60.0;
+    double sec = 0.5 / bps;
+    switch (params.delaySyncMode) {
+        case 1: sec = 1.0/bps;         break;
+        case 2: sec = 0.5/bps;         break;
+        case 3: sec = 0.25/bps;        break;
+        case 4: sec = (2.0/3.0)/bps;   break;
+        case 5: sec = (1.0/3.0)/bps;   break;
+        default: break;
+    }
+    return (float)(sec * sr);
+}
+
+float EffectsChain::distClip(float x, float a) noexcept { return std::tanh((1.0f+a*9.0f)*x); }
+float EffectsChain::distTape(float x, float a) noexcept { float d=(1.0f+a*3.0f)*x; return d/(1.0f+std::abs(d)); }
+float EffectsChain::distTube(float x, float a) noexcept {
+    float d=(1.0f+a*5.0f)*x;
+    return d>=0.0f ? std::tanh(d) : d/(1.0f+0.5f*std::abs(d));
+}
+
+void EffectsChain::process(float* outL, float* outR, int n)
+{
+    if (n == 0) return;
+
+    // 1. Reverb
+    reverb.process(outL, outR, n, params.reverbAmount);
+
+    // 2. Distortion
+    if (params.distAmount > 0.0f) {
+        for (int i=0;i<n;i++) {
+            switch (params.distMode) {
+                case 1: outL[i]=distTape(outL[i],params.distAmount); outR[i]=distTape(outR[i],params.distAmount); break;
+                case 2: outL[i]=distTube(outL[i],params.distAmount); outR[i]=distTube(outR[i],params.distAmount); break;
+                default:outL[i]=distClip(outL[i],params.distAmount); outR[i]=distClip(outR[i],params.distAmount); break;
+            }
+        }
+    }
+
+    // 3. Ping-pong delay
+    {
+        const float dtL = delayTimeSamples();
+        const float dtR = dtL + kPingPongMs * 0.001f * (float)sr;
+
+        if (params.delayLowcut != lastDlcFreq) {
+            dlcL=dlcR=Biquad::makeHP(sr, params.delayLowcut); lastDlcFreq=params.delayLowcut;
+        }
+        if (params.delayHighcut != lastDhcFreq) {
+            dhcL=dhcR=Biquad::makeLP(sr, params.delayHighcut); lastDhcFreq=params.delayHighcut;
+        }
+
+        for (int i=0;i<n;i++) {
+            float wL = readBuf(delBufL, delPos, dtL);
+            float wR = readBuf(delBufR, delPos, dtR);
+            float fbL = dlcL.process(dhcL.process(wR * kFeedback));
+            float fbR = dlcR.process(dhcR.process(wL * kFeedback));
+            delBufL[delPos] = outL[i] + fbL;
+            delBufR[delPos] = outR[i] + fbR;
+            outL[i] += wL;
+            outR[i] += wR;
+            if (++delPos >= delSize) delPos = 0;
+        }
+    }
+
+    // 4. Chorus
+    if (params.chorusAmount > 0.0f) {
+        const float center = 5.0f*0.001f*(float)sr;
+        const float depth  = 2.0f*0.001f*(float)sr;
+        const float inc    = kTwoPiF * 0.5f / (float)sr;
+        for (int i=0;i<n;i++) {
+            choBufL[choPos]=outL[i]; choBufR[choPos]=outR[i];
+            float mL = center + depth*std::sin(choPhase);
+            float mR = center + depth*std::sin(choPhase + (float)M_PI);
+            float wL = readBuf(choBufL, choPos, mL);
+            float wR = readBuf(choBufR, choPos, mR);
+            outL[i] = outL[i]*(1.0f-params.chorusAmount) + wL*params.chorusAmount;
+            outR[i] = outR[i]*(1.0f-params.chorusAmount) + wR*params.chorusAmount;
+            if (++choPos >= choSize) choPos = 0;
+            choPhase += inc;
+            if (choPhase > kTwoPiF) choPhase -= kTwoPiF;
+        }
+    }
+
+    // 5. Output HP + LP filters
+    if (params.hpFreq != lastHpFreq) { hpL=hpR=Biquad::makeHP(sr, params.hpFreq); lastHpFreq=params.hpFreq; }
+    if (params.lpFreq != lastLpFreq) { lpL=lpR=Biquad::makeLP(sr, params.lpFreq); lastLpFreq=params.lpFreq; }
+    for (int i=0;i<n;i++) {
+        outL[i] = lpL.process(hpL.process(outL[i]));
+        outR[i] = lpR.process(hpR.process(outR[i]));
+    }
+}
