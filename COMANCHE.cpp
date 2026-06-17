@@ -172,8 +172,6 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     std::fill(mTmpL, mTmpL+n, 0.0f);
     std::fill(mTmpR, mTmpR+n, 0.0f);
 
-    mMidiQueue.StartBlock();
-
     for (int s = 0; s < n; s++) {
         // MIDI at this sample position
         while (!mMidiQueue.Empty()) {
