@@ -144,7 +144,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         g->AttachControl(new ITextControl(
             IRECT(full.L+12, full.B-20, full.R-12, full.B),
             mLibrary.getFolder().empty() ? "no folder selected" : mLibrary.getFolder().c_str(),
-            IText(9.0f, IColor(120,26,26,26), nullptr, EAlign::Near, EVAlign::Middle)));
+            IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
     };
 #endif
 }

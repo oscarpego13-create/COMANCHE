@@ -77,10 +77,10 @@ public:
         GetParam()->GetDisplay(vs, false);
         const char* u = GetParam()->GetLabel();
         if (u && u[0]) vs.Append(u);
-        IText vt(mIsMacro ? 13.0f : 11.0f, CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle);
-        g.DrawText(vt, vs.Get(), IRECT(mRECT.L, kCy+kR+4, mRECT.R, kCy+kR+17));
-        IText lt(8.5f, IColor(255,108,105,98), nullptr, EAlign::Center, EVAlign::Middle);
-        g.DrawText(lt, mLabel, IRECT(mRECT.L, kCy+kR+17, mRECT.R, kCy+kR+29));
+        IText vt(mIsMacro ? 12.0f : 10.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        g.DrawText(vt, vs.Get(), IRECT(mRECT.L, kCy+kR+2, mRECT.R, kCy+kR+16));
+        IText lt(8.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        g.DrawText(lt, mLabel, IRECT(mRECT.L, kCy+kR+16, mRECT.R, kCy+kR+30));
     }
 
     void OnAttached() override { if (GetParam()) SetValue(GetParam()->GetNormalized()); }
@@ -108,7 +108,7 @@ public:
     void Draw(IGraphics& g) override {
         bool active = ((int)(GetParam()->Value()+0.5) == mMode);
         g.FillRoundRect(active ? CT::btnActive : CT::btnInactive, mRECT, 2.0f);
-        IText t(8.5f, active ? CT::textLight : CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle);
+        IText t(8.0f, active ? CT::textLight : CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(t, mLabel, mRECT);
     }
     void OnMouseDown(float, float, const IMouseMod&) override {
@@ -133,7 +133,7 @@ public:
             IRECT row(mRECT.L, mRECT.T + (i-mScroll)*rowH, mRECT.R, mRECT.T + (i-mScroll+1)*rowH);
             bool sel = (i == mSelected);
             if (sel) g.FillRect(CT::fgPrimary, row);
-            IText t(10.0f, sel ? CT::textLight : CT::fgPrimary, nullptr, EAlign::Near, EVAlign::Middle);
+            IText t(10.0f, sel ? CT::textLight : CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle);
             IRECT tr(row.L+8, row.T, row.R, row.B);
             g.DrawText(t, mNames[i].c_str(), tr);
         }
@@ -170,7 +170,7 @@ public:
         : IControl(b, kNoParameter), mLabel(lbl), mFn(std::move(fn)) {}
     void Draw(IGraphics& g) override {
         g.FillRoundRect(CT::btnInactive, mRECT, 2.0f);
-        IText t(9.0f, CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle);
+        IText t(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(t, mLabel, mRECT);
     }
     void OnMouseDown(float, float, const IMouseMod&) override {
