@@ -50,7 +50,10 @@ jobs:
 
       - name: Show build errors
         if: failure()
-        run: grep -E "error:|fatal error:|undefined|does not|no viable|cannot|undeclared" /tmp/build_log.txt | head -60 || tail -80 /tmp/build_log.txt
+        run: |
+          ERRORS=$(grep -E "error:|fatal error:" /tmp/build_log.txt | head -40 || tail -60 /tmp/build_log.txt)
+          echo "$ERRORS"
+          while IFS= read -r line; do echo "::error::$line"; done <<< "$ERRORS"
 
       - name: Show build output
         if: always()
