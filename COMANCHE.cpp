@@ -361,8 +361,13 @@ void COMANCHE::loadSample(int idx)
     // Auto-load preset JSON if present
     mPresets.onSampleLoaded(path);
     for (auto& kv : mPresets.getValues()) {
-        if (auto* p = GetParam(kv.first.c_str()))
-            p->SetNormalized(p->ToNormalized(kv.second));
+        for (int pi = 0; pi < kNumParams; pi++) {
+            auto* p = GetParam(pi);
+            if (std::string(p->GetName()) == kv.first) {
+                p->SetNormalized(p->ToNormalized(kv.second));
+                break;
+            }
+        }
     }
 }
 
