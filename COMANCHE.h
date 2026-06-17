@@ -2,7 +2,7 @@
 
 #include "IPlug_include_in_plug_hdr.h"
 #include "IControls.h"
-#include "IMidiQueue.h"
+#include "IPlugMidi.h"
 
 #include <vector>
 #include <string>
