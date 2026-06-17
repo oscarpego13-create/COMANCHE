@@ -40,19 +40,18 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             IText(11.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
 
         // CHANGE FOLDER button
-        g->AttachControl(new ILambdaControl(
+        g->AttachControl(new ButtonControl(
             IRECT(hdr.R-150, hdr.T+6, hdr.R-8, hdr.B-6),
-            [](ILambdaControl* c, IGraphics& gr) {
-                gr.FillRoundRect(CT::btnInactive, c->GetRECT(), 2.0f);
-                gr.DrawText(IText(9.0f, CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle),
-                            "CHANGE FOLDER", c->GetRECT());
-            },
-            [this](ILambdaControl*, IGraphics* gr, float, float, const IMouseMod&) {
+            "CHANGE FOLDER",
+            [this](IGraphics* gr) {
                 WDL_String dir;
-                gr->PromptForDirectory(dir);
-                if (dir.GetLength() > 0)
-                    gr->GetDelegate()->SendArbitraryMsgFromUI(
-                        kMsgOpenFolder, kNoTag, dir.GetLength()+1, dir.Get());
+                gr->PromptForDirectory(dir, [this](const WDL_String& /*name*/, const WDL_String& path) {
+                    if (path.GetLength() > 0) {
+                        mFolderPath = std::string(path.Get());
+                        mLibrary.setFolder(mFolderPath);
+                        if (GetUI()) GetUI()->SetAllControlsDirty();
+                    }
+                });
             }));
 
         // ── Left panel (280px): sample list + buttons ─────────────────────────
@@ -73,23 +72,15 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         const float btnB = leftPanel.B - 8;
         const float btnMid = leftPanel.MW();
 
-        g->AttachControl(new ILambdaControl(
+        g->AttachControl(new ButtonControl(
             IRECT(leftPanel.L+8, btnT, btnMid-4, btnB),
-            [](ILambdaControl* c, IGraphics& gr) {
-                gr.FillRoundRect(CT::btnInactive, c->GetRECT(), 2.0f);
-                gr.DrawText(IText(9.0f, CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle),
-                            "SAVE PRESET", c->GetRECT());
-            },
-            [this](ILambdaControl*, IGraphics*, float, float, const IMouseMod&) { savePreset(); }));
+            "SAVE PRESET",
+            [this](IGraphics*) { savePreset(); }));
 
-        g->AttachControl(new ILambdaControl(
+        g->AttachControl(new ButtonControl(
             IRECT(btnMid+4, btnT, leftPanel.R-8, btnB),
-            [](ILambdaControl* c, IGraphics& gr) {
-                gr.FillRoundRect(CT::btnInactive, c->GetRECT(), 2.0f);
-                gr.DrawText(IText(9.0f, CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle),
-                            "DEL PRESET", c->GetRECT());
-            },
-            [this](ILambdaControl*, IGraphics*, float, float, const IMouseMod&) { deletePreset(); }));
+            "DEL PRESET",
+            [this](IGraphics*) { deletePreset(); }));
 
         // ── Right panel: MACRO + effects grid ────────────────────────────────
         const IRECT rp(full.L+280, panelT, full.R, panelB);
@@ -319,14 +310,8 @@ void COMANCHE::OnUIOpen()
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
 
-bool COMANCHE::OnMessage(int msgTag, int, int dataSize, const void* pData)
+bool COMANCHE::OnMessage(int msgTag, int, int /*dataSize*/, const void* pData)
 {
-    if (msgTag == kMsgOpenFolder) {
-        mFolderPath = std::string((const char*)pData);
-        mLibrary.setFolder(mFolderPath);
-        if (GetUI()) GetUI()->SetAllControlsDirty();
-        return true;
-    }
     if (msgTag == kMsgLoadSample) {
         int idx = *(const int*)pData;
         loadSample(idx);

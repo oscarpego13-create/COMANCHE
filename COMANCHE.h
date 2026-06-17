@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include "EffectsChain.h"
 #include "SampleLibrary.h"
@@ -36,8 +37,7 @@ enum EParams {
 
 // ─── Cross-thread message tags ───────────────────────────────────────────────
 enum EMsgTags {
-    kMsgOpenFolder = 0,
-    kMsgLoadSample,
+    kMsgLoadSample = 0,
 };
 
 // ─── Design system colours ───────────────────────────────────────────────────
@@ -159,6 +159,26 @@ private:
     const std::vector<std::string>& mNames;
     int& mSelected;
     int mScroll{0};
+};
+
+// ─── Simple clickable button (replaces ILambdaControl for mouse handling) ─────
+class ButtonControl final : public IControl
+{
+public:
+    using OnClickFn = std::function<void(IGraphics*)>;
+    ButtonControl(const IRECT& b, const char* lbl, OnClickFn fn)
+        : IControl(b, kNoParameter), mLabel(lbl), mFn(std::move(fn)) {}
+    void Draw(IGraphics& g) override {
+        g.FillRoundRect(CT::btnInactive, mRECT, 2.0f);
+        IText t(9.0f, CT::fgPrimary, nullptr, EAlign::Center, EVAlign::Middle);
+        g.DrawText(t, mLabel, mRECT);
+    }
+    void OnMouseDown(float, float, const IMouseMod&) override {
+        if (mFn) mFn(GetUI());
+    }
+private:
+    const char* mLabel;
+    OnClickFn mFn;
 };
 
 // ─── Main plugin class ────────────────────────────────────────────────────────
