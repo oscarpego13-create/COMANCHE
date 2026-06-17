@@ -85,14 +85,14 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         // ── Right panel: MACRO + effects grid ────────────────────────────────
         const IRECT rp(full.L+280, panelT, full.R, panelB);
 
-        // MACRO knob (90×90, centred top)
-        const float mKW = 108, mKH = 110;
+        // MACRO knob — centred, pushed down so effects rows land near bottom
+        const float mKW = 108, mKH = 130;
         g->AttachControl(new ComanacheKnob(
-            IRECT(rp.MW()-mKW*0.5f, rp.T+8, rp.MW()+mKW*0.5f, rp.T+8+mKH),
+            IRECT(rp.MW()-mKW*0.5f, rp.T+100, rp.MW()+mKW*0.5f, rp.T+100+mKH),
             kMacro, "MACRO", CT::knobGold, true));
 
         // Effects row 1: REVERB | DIST | DELAY
-        const float efxT = rp.T + 128;
+        const float efxT = rp.T + 252;
         const float kW = 74, kH = 90;
         const float btnH = 22, btnW = 40;
         float x = rp.L + 16;

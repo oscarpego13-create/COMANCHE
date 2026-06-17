@@ -24,3 +24,8 @@ iplug_add_plugin(${PROJECT_NAME}
   RESOURCES
     resources/fonts/Roboto-Mono-Regular.ttf
 )
+
+target_link_libraries(${PROJECT_NAME}-vst3 PRIVATE
+  "-framework AudioToolbox"
+  "-framework CoreFoundation"
+)

@@ -2,8 +2,8 @@
 #include <string>
 #include <vector>
 
-// Scans a folder for WAV files and decodes them on demand.
-// No JUCE dependency — uses std::filesystem + a minimal WAV reader.
+// Scans a folder recursively for WAV and MP3 files.
+// Uses macOS AudioToolbox for decoding — handles both formats natively.
 class SampleLibrary
 {
 public:
@@ -13,7 +13,6 @@ public:
     const std::vector<std::string>& getSampleNames() const { return sampleNames; }
     std::string getSamplePath(int index) const;
 
-    // Returns true and fills left/right on success (mono → left only, right = left)
     bool loadSample(const std::string& path,
                     std::vector<float>& left,
                     std::vector<float>& right,
@@ -26,10 +25,4 @@ private:
     std::vector<std::string> sampleNames;
 
     void scan();
-
-    static bool readWav(const std::string& path,
-                        std::vector<float>& left,
-                        std::vector<float>& right,
-                        int& numChannels,
-                        double& sampleRate);
 };

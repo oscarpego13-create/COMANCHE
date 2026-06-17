@@ -1,13 +1,10 @@
 #include "SampleLibrary.h"
 #include <filesystem>
 #include <algorithm>
-#include <cstdio>
-#include <cstring>
-#include <cstdint>
+#include <AudioToolbox/AudioToolbox.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 namespace fs = std::filesystem;
-
-// ─── Folder management ───────────────────────────────────────────────────────
 
 void SampleLibrary::setFolder(const std::string& folderPath)
 {
@@ -32,13 +29,14 @@ void SampleLibrary::scan()
     if (!fs::is_directory(currentFolder, ec)) return;
 
     std::vector<fs::path> found;
-    for (auto& e : fs::directory_iterator(currentFolder, ec))
+    for (auto& e : fs::recursive_directory_iterator(
+             currentFolder,
+             fs::directory_options::skip_permission_denied, ec))
     {
         if (!e.is_regular_file()) continue;
         auto ext = e.path().extension().string();
-        // Case-insensitive .wav check
         for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
-        if (ext == ".wav")
+        if (ext == ".wav" || ext == ".mp3")
             found.push_back(e.path());
     }
 
@@ -46,7 +44,8 @@ void SampleLibrary::scan()
 
     for (auto& p : found) {
         samplePaths.push_back(p.string());
-        sampleNames.push_back(p.stem().string());
+        auto rel = fs::relative(p, currentFolder, ec);
+        sampleNames.push_back(ec ? p.stem().string() : rel.string());
     }
 }
 
@@ -56,87 +55,64 @@ bool SampleLibrary::loadSample(const std::string& path,
                                int& numChannels,
                                double& sampleRate)
 {
-    return readWav(path, left, right, numChannels, sampleRate);
-}
+    CFStringRef cfStr = CFStringCreateWithCString(nullptr, path.c_str(), kCFStringEncodingUTF8);
+    CFURLRef url = CFURLCreateWithFileSystemPath(nullptr, cfStr, kCFURLPOSIXPathStyle, false);
+    CFRelease(cfStr);
 
-// ─── Minimal WAV decoder (16-bit, 24-bit, 32-bit float/int PCM) ─────────────
+    ExtAudioFileRef file = nullptr;
+    OSStatus err = ExtAudioFileOpenURL(url, &file);
+    CFRelease(url);
+    if (err != noErr || !file) return false;
 
-static uint16_t read16(FILE* f) { uint16_t v; fread(&v, 2, 1, f); return v; }
-static uint32_t read32(FILE* f) { uint32_t v; fread(&v, 4, 1, f); return v; }
+    AudioStreamBasicDescription origFmt = {};
+    UInt32 propSize = sizeof(origFmt);
+    ExtAudioFileGetProperty(file, kExtAudioFileProperty_FileDataFormat, &propSize, &origFmt);
 
-bool SampleLibrary::readWav(const std::string& path,
-                            std::vector<float>& left,
-                            std::vector<float>& right,
-                            int& numChannels,
-                            double& sampleRate)
-{
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return false;
+    sampleRate  = origFmt.mSampleRate;
+    numChannels = (int)origFmt.mChannelsPerFrame;
+    const int outCh = std::min(numChannels, 2);
 
-    // RIFF header
-    char id[4];
-    fread(id, 1, 4, f);
-    if (memcmp(id, "RIFF", 4) != 0) { fclose(f); return false; }
-    read32(f); // file size
-    fread(id, 1, 4, f);
-    if (memcmp(id, "WAVE", 4) != 0) { fclose(f); return false; }
+    AudioStreamBasicDescription outFmt = {};
+    outFmt.mSampleRate       = origFmt.mSampleRate;
+    outFmt.mFormatID         = kAudioFormatLinearPCM;
+    outFmt.mFormatFlags      = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    outFmt.mBitsPerChannel   = 32;
+    outFmt.mChannelsPerFrame = (UInt32)outCh;
+    outFmt.mBytesPerFrame    = (UInt32)(outCh * 4);
+    outFmt.mFramesPerPacket  = 1;
+    outFmt.mBytesPerPacket   = (UInt32)(outCh * 4);
+    ExtAudioFileSetProperty(file, kExtAudioFileProperty_ClientDataFormat, sizeof(outFmt), &outFmt);
 
-    uint16_t audioFmt = 1, numCh = 2, bitsPerSample = 16;
-    uint32_t sr = 44100;
+    SInt64 numFrames = 0;
+    propSize = sizeof(numFrames);
+    ExtAudioFileGetProperty(file, kExtAudioFileProperty_FileLengthFrames, &propSize, &numFrames);
 
-    while (fread(id, 1, 4, f) == 4) {
-        uint32_t chunkSize = read32(f);
-        long chunkStart = ftell(f);
+    left.assign((size_t)numFrames, 0.0f);
+    right.assign((size_t)numFrames, 0.0f);
 
-        if (memcmp(id, "fmt ", 4) == 0) {
-            audioFmt     = read16(f);
-            numCh        = read16(f);
-            sr           = read32(f);
-            read32(f);               // byte rate
-            read16(f);               // block align
-            bitsPerSample = read16(f);
-            fseek(f, chunkStart + chunkSize, SEEK_SET);
+    const int kChunk = 4096;
+    std::vector<float> buf((size_t)(kChunk * outCh));
+    int pos = 0;
+
+    while (pos < (int)numFrames) {
+        UInt32 toRead = (UInt32)std::min(kChunk, (int)numFrames - pos);
+        AudioBufferList abl;
+        abl.mNumberBuffers              = 1;
+        abl.mBuffers[0].mNumberChannels = (UInt32)outCh;
+        abl.mBuffers[0].mDataByteSize   = toRead * (UInt32)(outCh * 4);
+        abl.mBuffers[0].mData           = buf.data();
+
+        if (ExtAudioFileRead(file, &toRead, &abl) != noErr || toRead == 0) break;
+
+        for (UInt32 f = 0; f < toRead; f++) {
+            left[pos + f]  = buf[f * (UInt32)outCh];
+            right[pos + f] = (outCh > 1) ? buf[f * (UInt32)outCh + 1] : buf[f * (UInt32)outCh];
         }
-        else if (memcmp(id, "data", 4) == 0) {
-            sampleRate  = (double)sr;
-            numChannels = (int)numCh;
-            int bytesPerSample = bitsPerSample / 8;
-            int numFrames = (int)chunkSize / (bytesPerSample * numCh);
-
-            left.resize(numFrames);
-            right.resize(numFrames);
-
-            for (int i = 0; i < numFrames; i++) {
-                for (int ch = 0; ch < (int)numCh && ch < 2; ch++) {
-                    float s = 0.0f;
-                    if (bitsPerSample == 16) {
-                        int16_t v; fread(&v, 2, 1, f); s = v / 32768.0f;
-                    } else if (bitsPerSample == 24) {
-                        uint8_t b[3]; fread(b, 1, 3, f);
-                        int32_t v = ((int32_t)b[2] << 16) | ((int32_t)b[1] << 8) | b[0];
-                        if (v & 0x800000) v |= 0xFF000000;
-                        s = v / 8388608.0f;
-                    } else if (bitsPerSample == 32) {
-                        if (audioFmt == 3) { fread(&s, 4, 1, f); }      // IEEE float
-                        else { int32_t v; fread(&v, 4, 1, f); s = (float)(v / 2147483648.0); }
-                    }
-                    if (ch == 0) left[i]  = s;
-                    else         right[i] = s;
-                }
-                // skip extra channels beyond stereo
-                if (numCh > 2) fseek(f, (numCh-2) * bytesPerSample, SEEK_CUR);
-            }
-            // If mono, copy left to right
-            if (numCh == 1) right = left;
-
-            fclose(f);
-            return true;
-        }
-        else {
-            fseek(f, chunkStart + chunkSize, SEEK_SET);
-        }
+        pos += (int)toRead;
     }
 
-    fclose(f);
-    return false;
+    left.resize((size_t)pos);
+    right.resize((size_t)pos);
+    ExtAudioFileDispose(file);
+    return pos > 0;
 }
