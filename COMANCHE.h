@@ -194,8 +194,9 @@ private:
 class SampleListControl final : public IControl
 {
 public:
-    SampleListControl(const IRECT& b, const std::vector<std::string>& names, int& sel)
-        : IControl(b, kNoParameter), mNames(names), mSelected(sel) {}
+    using OnDropFn = std::function<void(const std::string&)>;
+    SampleListControl(const IRECT& b, const std::vector<std::string>& names, int& sel, OnDropFn dropFn={})
+        : IControl(b, kNoParameter), mNames(names), mSelected(sel), mDropFn(std::move(dropFn)) {}
 
     void Draw(IGraphics& g) override {
         const float sbW=12.0f, rowH=22.0f;
@@ -247,9 +248,13 @@ public:
         mScroll=std::clamp(mScroll-(int)d,0,maxSc); SetDirty(false);
     }
     void refresh(){mScroll=0;SetDirty(false);}
+    void OnDrop(const char* str) override {
+        if (mDropFn && str) { mScroll=0; mDropFn(std::string(str)); }
+    }
 private:
     int total() const {return (int)mNames.size();}
     const std::vector<std::string>& mNames; int& mSelected;
+    OnDropFn mDropFn;
     int mScroll{0}; bool mSbDrag{false}; float mSbY{0};
 };
 
@@ -402,8 +407,19 @@ public:
 
     void Draw(IGraphics& g) override {
         float val=(float)GetValue();
-        float vuL=mVuL?std::min(1.0f,mVuL->load()):0.0f;
-        float vuR=mVuR?std::min(1.0f,mVuR->load()):0.0f;
+        float linL=mVuL?mVuL->load():0.0f;
+        float linR=mVuR?mVuR->load():0.0f;
+
+        // Convert linear peak to dB-normalised for display (range -60 to +6 dB)
+        static constexpr float kDbMin=-60.0f, kDbMax=6.0f, kDbRng=66.0f;
+        auto toNorm=[](float lin)->float{
+            if(lin<1e-6f) return 0.0f;
+            float db=20.0f*std::log10(lin);
+            return std::clamp((db-kDbMin)/kDbRng, 0.0f, 1.0f);
+        };
+        float vuNL=toNorm(linL), vuNR=toNorm(linR);
+        // Color thresholds: yellow starts at -6dB (54/66≈0.818), red above 0dB (60/66≈0.909)
+        static constexpr float kYel=54.0f/66.0f, kRed=60.0f/66.0f;
 
         const float vuW=9.0f, slW=14.0f;
         const float h=mRECT.H()-4.0f, top=mRECT.T+2.0f, bot=top+h;
@@ -411,17 +427,17 @@ public:
         // VU Left
         float lx=mRECT.L;
         g.FillRoundRect(IColor(255,50,50,54), IRECT(lx,top,lx+vuW,bot),3.0f);
-        float lH=vuL*h;
+        float lH=vuNL*h;
         if(lH>0.5f){
-            IColor vc=vuL>0.85f?IColor(255,240,60,50):vuL>0.65f?IColor(255,220,200,50):IColor(255,80,200,100);
+            IColor vc=vuNL>kRed?IColor(255,240,60,50):vuNL>kYel?IColor(255,220,200,50):IColor(255,80,200,100);
             g.FillRoundRect(vc,IRECT(lx+1,bot-lH,lx+vuW-1,bot-1),2.0f);
         }
         // VU Right
         float rx=lx+vuW+2.0f;
         g.FillRoundRect(IColor(255,50,50,54), IRECT(rx,top,rx+vuW,bot),3.0f);
-        float rH=vuR*h;
+        float rH=vuNR*h;
         if(rH>0.5f){
-            IColor vc=vuR>0.85f?IColor(255,240,60,50):vuR>0.65f?IColor(255,220,200,50):IColor(255,80,200,100);
+            IColor vc=vuNR>kRed?IColor(255,240,60,50):vuNR>kYel?IColor(255,220,200,50):IColor(255,80,200,100);
             g.FillRoundRect(vc,IRECT(rx+1,bot-rH,rx+vuW-1,bot-1),2.0f);
         }
         // Slider track
@@ -433,8 +449,8 @@ public:
         // Handle
         float hy=bot-fillH;
         g.FillRect(IColor(255,228,224,218),IRECT(sx-2,hy-1.5f,sx+slW+2,hy+1.5f));
-        // 0dB mark (param range 0-2, so norm 0.5 = value 1.0 = 0dB)
-        float zY=bot-0.5f*h;
+        // 0dB mark: param range -60..+6dB, so norm(0dB) = 60/66
+        float zY=bot-kRed*h;
         g.DrawLine(IColor(255,200,170,60),sx-3,zY,sx+slW+3,zY,nullptr,1.2f);
     }
 

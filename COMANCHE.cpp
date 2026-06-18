@@ -20,7 +20,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kChorusAmount) ->InitDouble("Chorus",      0.0,     0.0,   1.0,    0.001);
     GetParam(kHpFreq)       ->InitDouble("HP",          20.0,    20.0,  2000.0, 1.0,  "Hz");
     GetParam(kLpFreq)       ->InitDouble("LP",          20000.0, 500.0, 20000.0,1.0,  "Hz");
-    GetParam(kOutputVol)    ->InitDouble("OutVol",      1.0,     0.0,   2.0,    0.001);
+    GetParam(kOutputVol)    ->InitDouble("OutVol",      0.0,   -60.0,   6.0,    0.1, "dB");
     GetParam(kMacro)        ->InitDouble("Macro",       0.0,     0.0,   1.0,    0.001);
 
 #if IPLUG_EDITOR
@@ -67,11 +67,24 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             }));
 
         g->AttachControl(new SaveIconButton(
-            IRECT(lp.L+190, btnRowT, lp.L+256, btnRowB),
+            IRECT(lp.L+192, btnRowT, lp.L+218, btnRowB),  // 26×26 (1:1)
             [this]() { savePreset(); }));
 
         const IRECT listR(lp.L+2, btnRowB+4, lp.R-2, panelB-2);
-        g->AttachControl(new SampleListControl(listR, mLibrary.getSampleNames(), mSelectedIdx));
+        g->AttachControl(new SampleListControl(listR, mLibrary.getSampleNames(), mSelectedIdx,
+            [this](const std::string& filePath) {
+                // Find the parent folder of the dropped file and set it as library root
+                size_t slash = filePath.find_last_of("/\\");
+                if (slash == std::string::npos) return;
+                mFolderPath = filePath.substr(0, slash);
+                mLibrary.setFolder(mFolderPath);
+                // Auto-select and load the dropped file
+                auto& names = mLibrary.getSampleNames();
+                for (int i = 0; i < (int)names.size(); i++) {
+                    if (mLibrary.getSamplePath(i) == filePath) { loadSample(i); break; }
+                }
+                if (GetUI()) GetUI()->SetAllControlsDirty();
+            }));
 
         // ── Right panel ────────────────────────────────────────────────────────
         const IRECT rp(full.L+260.0f, panelT, full.R, panelB);
@@ -316,7 +329,8 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     ep.chorusAmount  = applyMacro(kChorusAmount);
     ep.hpFreq        = applyMacro(kHpFreq);
     ep.lpFreq        = applyMacro(kLpFreq);
-    ep.outputVol     = applyMacro(kOutputVol);
+    float dBVol      = applyMacro(kOutputVol);  // dB, -60..+6
+    ep.outputVol     = (dBVol <= -59.0f) ? 0.0f : std::pow(10.0f, dBVol / 20.0f);
     ep.bpm           = GetTempo() > 0.0 ? GetTempo() : 120.0;
 
     mFX.setParameters(ep);
@@ -329,8 +343,9 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
         peakL = std::max(peakL, std::abs(mTmpL[i]));
         peakR = std::max(peakR, std::abs(mTmpR[i]));
     }
-    mVuPeakL.store(std::max(mVuPeakL.load() * 0.9994f, peakL));
-    mVuPeakR.store(std::max(mVuPeakR.load() * 0.9994f, peakR));
+    // Fast peak decay (~0.4s half-life per ProcessBlock call at typical block sizes)
+    mVuPeakL.store(std::max(mVuPeakL.load() * 0.982f, peakL));
+    mVuPeakR.store(std::max(mVuPeakR.load() * 0.982f, peakR));
 }
 
 // ─── Voice management ────────────────────────────────────────────────────────
@@ -441,7 +456,11 @@ void COMANCHE::loadSample(int idx)
 
     for (auto& v : mVoices) v.active = false;
 
+    // Always reset params to defaults first, then overlay saved preset (if any).
+    // This ensures switching to an unsaved oneshot gives a clean slate.
     mPresets.onSampleLoaded(path);
+    for (int pi = 0; pi < kNumParams; pi++)
+        GetParam(pi)->SetNormalized(GetParam(pi)->GetDefault(true));
     for (auto& kv : mPresets.getValues()) {
         for (int pi = 0; pi < kNumParams; pi++) {
             auto* p = GetParam(pi);
