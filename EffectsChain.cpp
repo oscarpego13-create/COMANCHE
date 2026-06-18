@@ -53,8 +53,8 @@ void ComanacheReverb::prepare(double sampleRate)
 void ComanacheReverb::process(float* L, float* R, int n, float amount)
 {
     if (amount <= 0.0f) return;
-    const float fb   = 0.50f;   // plate character: moderate room size
-    const float damp = 0.40f;   // moderate damping
+    const float fb   = 0.88f;   // ~2s RT60 decay
+    const float damp = 0.30f;
     const float wet  = amount;
     const float dry  = 1.0f - amount;
 
@@ -119,10 +119,10 @@ float EffectsChain::delayTimeSamples() const
     return (float)(sec * sr);
 }
 
-float EffectsChain::distClip(float x, float a) noexcept { return std::tanh((1.0f+a*9.0f)*x); }
-float EffectsChain::distTape(float x, float a) noexcept { float d=(1.0f+a*3.0f)*x; return d/(1.0f+std::abs(d)); }
+float EffectsChain::distClip(float x, float a) noexcept { return std::tanh((1.0f+a*22.0f)*x); }
+float EffectsChain::distTape(float x, float a) noexcept { float d=(1.0f+a*12.0f)*x; return d/(1.0f+std::abs(d)); }
 float EffectsChain::distTube(float x, float a) noexcept {
-    float d=(1.0f+a*5.0f)*x;
+    float d=(1.0f+a*16.0f)*x;
     return d>=0.0f ? std::tanh(d) : d/(1.0f+0.5f*std::abs(d));
 }
 
@@ -156,11 +156,12 @@ void EffectsChain::process(float* outL, float* outR, int n)
             dhcL=dhcR=Biquad::makeLP(sr, params.delayHighcut); lastDhcFreq=params.delayHighcut;
         }
 
+        const float fb = std::clamp(params.delayFeedback, 0.0f, 0.97f);
         for (int i=0;i<n;i++) {
             float wL = readBuf(delBufL, delPos, dtL);
             float wR = readBuf(delBufR, delPos, dtR);
-            float fbL = dlcL.process(dhcL.process(wR * kFeedback));
-            float fbR = dlcR.process(dhcR.process(wL * kFeedback));
+            float fbL = dlcL.process(dhcL.process(wR * fb));
+            float fbR = dlcR.process(dhcR.process(wL * fb));
             delBufL[delPos] = outL[i] + fbL;
             delBufR[delPos] = outR[i] + fbR;
             outL[i] += wL;
@@ -191,8 +192,9 @@ void EffectsChain::process(float* outL, float* outR, int n)
     // 5. Output HP + LP filters
     if (params.hpFreq != lastHpFreq) { hpL=hpR=Biquad::makeHP(sr, params.hpFreq); lastHpFreq=params.hpFreq; }
     if (params.lpFreq != lastLpFreq) { lpL=lpR=Biquad::makeLP(sr, params.lpFreq); lastLpFreq=params.lpFreq; }
+    const float vol = params.outputVol;
     for (int i=0;i<n;i++) {
-        outL[i] = lpL.process(hpL.process(outL[i]));
-        outR[i] = lpR.process(hpR.process(outR[i]));
+        outL[i] = lpL.process(hpL.process(outL[i])) * vol;
+        outR[i] = lpR.process(hpR.process(outR[i])) * vol;
     }
 }

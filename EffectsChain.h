@@ -65,11 +65,13 @@ struct EffectsParameters {
     int    distMode      { 0 };
     int    delaySyncMode { 0 };
     float  delayTimeMs   { 500.0f };
+    float  delayFeedback { 0.35f };
     float  delayLowcut   { 20.0f };
     float  delayHighcut  { 18000.0f };
     float  chorusAmount  { 0.0f };
     float  hpFreq        { 20.0f };
     float  lpFreq        { 20000.0f };
+    float  outputVol     { 0.85f };
     double bpm           { 120.0 };
 };
 
@@ -89,7 +91,6 @@ private:
 
     // Ping-pong delay
     static constexpr int   kMaxDelaySec = 3;
-    static constexpr float kFeedback    = 0.35f;
     static constexpr float kPingPongMs  = 15.0f;
     std::vector<float> delBufL, delBufR;
     int delPos{0}, delSize{0};
