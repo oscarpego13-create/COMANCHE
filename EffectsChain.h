@@ -25,7 +25,7 @@ class ComanacheReverb
 {
 public:
     void prepare(double sampleRate);
-    void process(float* L, float* R, int numSamples, float amount);
+    void process(float* L, float* R, int numSamples, float amount, float decaySec);
 
 private:
     struct CombFilter {
@@ -61,17 +61,19 @@ private:
 // ─── Effects parameter snapshot ──────────────────────────────────────────────
 struct EffectsParameters {
     float  reverbAmount  { 0.0f };
+    float  reverbDecay   { 2.0f };
     float  distAmount    { 0.0f };
     int    distMode      { 0 };
     int    delaySyncMode { 0 };
     float  delayTimeMs   { 500.0f };
     float  delayFeedback { 0.35f };
+    float  delayMix      { 0.5f };
     float  delayLowcut   { 20.0f };
     float  delayHighcut  { 18000.0f };
     float  chorusAmount  { 0.0f };
     float  hpFreq        { 20.0f };
     float  lpFreq        { 20000.0f };
-    float  outputVol     { 0.85f };
+    float  outputVol     { 1.0f };
     double bpm           { 120.0 };
 };
 

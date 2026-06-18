@@ -7,19 +7,21 @@
 COMANCHE::COMANCHE(const InstanceInfo& info)
   : Plugin(info, MakeConfig(kNumParams, 1))
 {
-    GetParam(kReverbAmount) ->InitDouble("Reverb",     0.0,    0.0,   1.0,   0.001);
-    GetParam(kDistAmount)   ->InitDouble("Dist",       0.0,    0.0,   1.0,   0.001);
-    GetParam(kDistMode)     ->InitEnum  ("DistMode",   0,      3,     "", 0, "", "CLIP","TAPE","TUBE");
-    GetParam(kDelaySyncMode)->InitEnum  ("DelaySync",  0,      6,     "", 0, "", "FREE","1/4","1/8","1/16","1/4T","1/8T");
-    GetParam(kDelayTimeMs)  ->InitDouble("DelayTime",  500.0,  1.0,   2000.0, 1.0, "ms");
-    GetParam(kDelayFeedback)->InitDouble("DelayFb",    0.35,   0.0,   0.97,   0.001);
-    GetParam(kDelayLowcut)  ->InitDouble("DelayLo",    20.0,   20.0,  500.0,  1.0, "Hz");
-    GetParam(kDelayHighcut) ->InitDouble("DelayHi",    18000.0,2000.0,18000.0,1.0, "Hz");
-    GetParam(kChorusAmount) ->InitDouble("Chorus",     0.0,    0.0,   1.0,   0.001);
-    GetParam(kHpFreq)       ->InitDouble("HP",         20.0,   20.0,  2000.0, 1.0, "Hz");
-    GetParam(kLpFreq)       ->InitDouble("LP",         20000.0,500.0, 20000.0,1.0, "Hz");
-    GetParam(kOutputVol)    ->InitDouble("OutVol",     0.85,   0.0,   1.0,   0.001);
-    GetParam(kMacro)        ->InitDouble("Macro",      0.0,    0.0,   1.0,   0.001);
+    GetParam(kReverbAmount) ->InitDouble("Reverb",      0.0,     0.0,   1.0,    0.001);
+    GetParam(kReverbDecay)  ->InitDouble("ReverbDecay", 2.0,     0.3,   8.0,    0.01, "s");
+    GetParam(kDistAmount)   ->InitDouble("Dist",        0.0,     0.0,   1.0,    0.001);
+    GetParam(kDistMode)     ->InitEnum  ("DistMode",    0,       3,     "", 0, "", "CLIP","TAPE","TUBE");
+    GetParam(kDelaySyncMode)->InitEnum  ("DelaySync",   0,       6,     "", 0, "", "FREE","1/4","1/8","1/16","1/4T","1/8T");
+    GetParam(kDelayTimeMs)  ->InitDouble("DelayTime",   500.0,   1.0,   2000.0, 1.0,  "ms");
+    GetParam(kDelayFeedback)->InitDouble("DelayFb",     0.35,    0.0,   0.97,   0.001);
+    GetParam(kDelayMix)     ->InitDouble("DelayMix",    0.5,     0.0,   1.0,    0.001);
+    GetParam(kDelayLowcut)  ->InitDouble("DelayLo",     20.0,    20.0,  500.0,  1.0,  "Hz");
+    GetParam(kDelayHighcut) ->InitDouble("DelayHi",     18000.0, 2000.0,18000.0,1.0,  "Hz");
+    GetParam(kChorusAmount) ->InitDouble("Chorus",      0.0,     0.0,   1.0,    0.001);
+    GetParam(kHpFreq)       ->InitDouble("HP",          20.0,    20.0,  2000.0, 1.0,  "Hz");
+    GetParam(kLpFreq)       ->InitDouble("LP",          20000.0, 500.0, 20000.0,1.0,  "Hz");
+    GetParam(kOutputVol)    ->InitDouble("OutVol",      1.0,     0.0,   2.0,    0.001);
+    GetParam(kMacro)        ->InitDouble("Macro",       0.0,     0.0,   1.0,    0.001);
 
 #if IPLUG_EDITOR
     mMakeGraphicsFunc = [&]() {
@@ -43,12 +45,11 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 
         // ── Left panel (260px): folder button + save icon + sample list ───────
         const float panelT = full.T + 34.0f;
-        const float panelB = full.B - 22.0f;
+        const float panelB = full.B;
         const IRECT lp(full.L, panelT, full.L+260.0f, panelB);
 
         g->AttachControl(new IPanelControl(lp, CT::bgPanel));
 
-        // "Buscar librerias" button + save icon at top of panel
         const float btnRowT = lp.T + 4.0f;
         const float btnRowB = btnRowT + 26.0f;
         g->AttachControl(new ButtonControl(
@@ -69,7 +70,6 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             IRECT(lp.L+190, btnRowT, lp.L+256, btnRowB),
             [this]() { savePreset(); }));
 
-        // Sample list with scrollbar
         const IRECT listR(lp.L+2, btnRowB+4, lp.R-2, panelB-2);
         g->AttachControl(new SampleListControl(listR, mLibrary.getSampleNames(), mSelectedIdx));
 
@@ -85,33 +85,30 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             kMacro, "MACRO", CT::knobGold, true));
 
         // ── Effect group boxes layout ─────────────────────────────────────────
-        // Row 1: y=rp.T+148 to rp.T+316 (168px), Row 2: y=rp.T+322 to rp.T+490 (168px)
         const float r1T  = rp.T + 148.0f;
         const float boxH = 168.0f;
         const float r2T  = r1T + boxH + 6.0f;
         const float bxL  = rp.L + 6.0f;
 
-        // Row 1 box widths: REVERB=138, DIST=178, DELAY=rest
-        const float rvW  = 138.0f;
-        const float dtW  = 178.0f;
-        const float dlW  = rp.R - bxL - rvW - 6 - dtW - 6 - 6;  // ~352px
+        // Row 1: REVERB(138) | DIST(178) | DELAY(rest)
+        const float rvW = 138.0f;
+        const float dtW = 178.0f;
+        const float dlW = rp.R - bxL - rvW - 6 - dtW - 6 - 6;
 
         const IRECT boxReverb(bxL,             r1T, bxL+rvW,           r1T+boxH);
         const IRECT boxDist  (bxL+rvW+6,       r1T, bxL+rvW+6+dtW,     r1T+boxH);
         const IRECT boxDelay (bxL+rvW+6+dtW+6, r1T, rp.R-6,            r1T+boxH);
 
-        // Row 2 box widths: CHORUS=138, OUTPUT=rest
+        // Row 2: CHORUS(138) | OUTPUT(rest)
         const IRECT boxChorus(bxL,        r2T, bxL+rvW,  r2T+boxH);
         const IRECT boxOutput(bxL+rvW+6,  r2T, rp.R-6,   r2T+boxH);
 
-        // Draw pastel box backgrounds
         g->AttachControl(new IPanelControl(boxReverb, CT::boxReverb));
         g->AttachControl(new IPanelControl(boxDist,   CT::boxDist));
         g->AttachControl(new IPanelControl(boxDelay,  CT::boxDelay));
         g->AttachControl(new IPanelControl(boxChorus, CT::boxChorus));
         g->AttachControl(new IPanelControl(boxOutput, CT::boxOutput));
 
-        // Box title helper
         auto addTitle = [&](const IRECT& box, const char* label) {
             g->AttachControl(new ITextControl(
                 IRECT(box.L+6, box.T+3, box.R-6, box.T+16),
@@ -124,125 +121,120 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         addTitle(boxChorus, "CHORUS");
         addTitle(boxOutput, "OUTPUT");
 
-        // Helper: place knob + macro link button inside a box
         auto addKnob = [&](const IRECT& knobR, int param, const char* lbl, IColor fill) {
-            auto* knob = new ComanacheKnob(knobR, param, lbl, fill,
-                                           false, &mMacroLink[param]);
-            g->AttachControl(knob);
-            // MacroLinkButton at top-right corner of knob rect
+            g->AttachControl(new ComanacheKnob(knobR, param, lbl, fill, false, &mMacroLink[param]));
             g->AttachControl(new MacroLinkButton(
-                IRECT(knobR.R-10, knobR.T, knobR.R, knobR.T+10),
-                mMacroLink[param]));
+                IRECT(knobR.R-10, knobR.T, knobR.R, knobR.T+10), mMacroLink[param]));
         };
 
         // ── REVERB box ────────────────────────────────────────────────────────
         {
-            float kW=70, kH=90;
-            float kX = boxReverb.MW()-kW*0.5f;
-            float kY = boxReverb.T + 18.0f;
+            const float kW=70, kH=90;
+            const float kX = boxReverb.MW() - kW*0.5f;
+            const float kY = boxReverb.T + 18.0f;
             addKnob(IRECT(kX,kY,kX+kW,kY+kH), kReverbAmount, "REVERB", CT::knobBlue);
+
+            // Reverb decay drag-value + macro link
+            const float dvW=60, dvH=18;
+            const float dvX = boxReverb.MW() - dvW*0.5f - 8.0f;
+            const float dvY = kY + kH + 4.0f;
+            g->AttachControl(new TinyDragValue(
+                IRECT(dvX, dvY, dvX+dvW, dvY+dvH), kReverbDecay));
+            g->AttachControl(new ITextControl(
+                IRECT(dvX, dvY+dvH+1, dvX+dvW, dvY+dvH+11),
+                "decay",
+                IText(8.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
+            g->AttachControl(new MacroLinkButton(
+                IRECT(dvX+dvW+3, dvY+4, dvX+dvW+3+10, dvY+4+10),
+                mMacroLink[kReverbDecay]));
         }
 
         // ── DIST box ─────────────────────────────────────────────────────────
         {
-            float kW=66, kH=90;
-            float kX = boxDist.L + 8.0f;
-            float kY = boxDist.T + 18.0f;
-            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kDistAmount, "DRIVE", CT::knobGold);
+            const float kW=66, kH=90;
+            const float kX = boxDist.L + 8.0f;
+            const float kY = boxDist.T + 18.0f;
+            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kDistAmount, "Distorsion", CT::knobGold);
 
-            // Mode buttons CLIP/TAPE/TUBE
-            float bX = kX+kW+8, bW=56, bH=22, bGap=4;
-            float totalBH = 3*bH+2*bGap;
-            float bY = kY + (kH-totalBH)*0.5f;
-            g->AttachControl(new ModeButton(IRECT(bX,bY,           bX+bW,bY+bH),         kDistMode,0,"CLIP"));
-            g->AttachControl(new ModeButton(IRECT(bX,bY+bH+bGap,   bX+bW,bY+2*bH+bGap),  kDistMode,1,"TAPE"));
-            g->AttachControl(new ModeButton(IRECT(bX,bY+2*(bH+bGap),bX+bW,bY+2*(bH+bGap)+bH),kDistMode,2,"TUBE"));
+            const float bX=kX+kW+8, bW=56, bH=22, bGap=4;
+            const float totalBH=3*bH+2*bGap;
+            const float bY=kY+(kH-totalBH)*0.5f;
+            g->AttachControl(new ModeButton(IRECT(bX,bY,               bX+bW,bY+bH),           kDistMode,0,"CLIP"));
+            g->AttachControl(new ModeButton(IRECT(bX,bY+bH+bGap,       bX+bW,bY+2*bH+bGap),   kDistMode,1,"TAPE"));
+            g->AttachControl(new ModeButton(IRECT(bX,bY+2*(bH+bGap),   bX+bW,bY+2*(bH+bGap)+bH), kDistMode,2,"TUBE"));
         }
 
         // ── DELAY box ────────────────────────────────────────────────────────
         {
-            float kW=60, kH=84;
-            float kY = boxDelay.T + 18.0f;
-            float kXa = boxDelay.L + 8.0f;  // TIME knob
-            float kXb = kXa + kW + 8.0f;    // FEEDBACK knob
+            const float kW=60, kH=84;
+            const float kY = boxDelay.T + 18.0f;
+            const float kXa = boxDelay.L + 8.0f;   // TIME knob
+            const float kXb = kXa + kW + 8.0f;     // FEEDBACK knob
+            const float kXc = kXb + kW + 16.0f;    // MIX / Cantidad knob
 
-            addKnob(IRECT(kXa,kY,kXa+kW,kY+kH), kDelayTimeMs,   "TIME",  CT::knobGrey);
-            addKnob(IRECT(kXb,kY,kXb+kW,kY+kH), kDelayFeedback, "FEEDBK",CT::knobGrey);
+            addKnob(IRECT(kXa,kY,kXa+kW,kY+kH), kDelayTimeMs,   "TIME",    CT::knobGrey);
+            addKnob(IRECT(kXb,kY,kXb+kW,kY+kH), kDelayFeedback, "FEEDBK",  CT::knobGrey);
+            addKnob(IRECT(kXc,kY,kXc+kW,kY+kH), kDelayMix,      "Cantidad",CT::knobBlue);
 
-            // BPM sync button below TIME knob
-            float sbT = kY + kH + 2.0f;
-            float sbH = 16.0f;
-            float sbW = kW * 2.0f + 8.0f;
-            // Sync mode buttons (3 × 2 grid)
+            // Sync mode buttons (2 cols × 3 rows) below TIME/FEEDBACK
+            const float sbBtnW=42, sbBtnH=14, sbBtnGap=2;
+            const float sbT = kY + kH + 2.0f;
             const char* syncLabels[] = {"FREE","1/4","1/8","1/16","1/4T","1/8T"};
-            float sbBtnW=42, sbBtnH=14, sbBtnGap=2;
             for (int i=0;i<6;i++) {
                 int col=i%2, row=i/2;
-                float sx = kXa + col*(sbBtnW+sbBtnGap);
-                float sy = sbT + row*(sbBtnH+sbBtnGap);
+                float sx=kXa+col*(sbBtnW+sbBtnGap), sy=sbT+row*(sbBtnH+sbBtnGap);
                 g->AttachControl(new ModeButton(IRECT(sx,sy,sx+sbBtnW,sy+sbBtnH),
                     kDelaySyncMode, i, syncLabels[i]));
             }
 
-            // 2D delay filter (1.5:1 ratio) — fills right portion of delay box
-            float dfL = kXb + kW + 10.0f;
-            float dfR = boxDelay.R - 8.0f;
-            float dfW = dfR - dfL;
-            float dfH = dfW / 1.5f;
-            float dfT = boxDelay.T + (boxH - dfH) * 0.5f;
-            g->AttachControl(new DelayFilterControl(
-                IRECT(dfL, dfT, dfR, dfT+dfH),
+            // BandFilterSlider for delay filter (right portion)
+            const float bfsW=36, bfsH=boxH-28.0f;
+            const float bfsX=boxDelay.R-8.0f-bfsW;
+            const float bfsY=boxDelay.T+18.0f;
+            g->AttachControl(new BandFilterSlider(
+                IRECT(bfsX, bfsY, bfsX+bfsW, bfsY+bfsH),
                 kDelayLowcut, kDelayHighcut));
-
-            // "FILTER" label above 2D control
             g->AttachControl(new ITextControl(
-                IRECT(dfL, boxDelay.T+3, dfR, boxDelay.T+16),
+                IRECT(bfsX-2, boxDelay.T+3, bfsX+bfsW+2, boxDelay.T+16),
                 "FILTER",
-                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
+                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
         }
 
         // ── CHORUS box ───────────────────────────────────────────────────────
         {
-            float kW=70, kH=90;
-            float kX = boxChorus.MW()-kW*0.5f;
-            float kY = boxChorus.T + 18.0f;
+            const float kW=70, kH=90;
+            const float kX = boxChorus.MW() - kW*0.5f;
+            const float kY = boxChorus.T + 18.0f;
             addKnob(IRECT(kX,kY,kX+kW,kY+kH), kChorusAmount, "CHORUS", CT::knobBlue);
         }
 
         // ── OUTPUT box ───────────────────────────────────────────────────────
         {
-            float innerL = boxOutput.L + 8.0f;
-            float innerT = boxOutput.T + 18.0f;
-            float innerH = boxH - 26.0f;  // available height below title
+            const float innerL = boxOutput.L + 8.0f;
+            const float innerT = boxOutput.T + 18.0f;
+            const float innerB = boxOutput.B - 14.0f;
 
-            // Volume slider + VU meter
-            float vsW = 46.0f;  // VU(9+2+9) + gap(4) + slider(14+2) = 40 → 46 total incl. handle overhang
-            float vsT = innerT;
-            float vsB = boxOutput.B - 16.0f;
+            // VolumeSlider (VU L+R + fader) with 0dB mark
+            const float vsW=46.0f;
             g->AttachControl(new VolumeSlider(
-                IRECT(innerL, vsT, innerL+vsW, vsB),
+                IRECT(innerL, innerT, innerL+vsW, innerB),
                 kOutputVol, &mVuPeakL, &mVuPeakR));
-            // "VOL" label below
             g->AttachControl(new ITextControl(
-                IRECT(innerL, vsB+1, innerL+vsW, vsB+13),
+                IRECT(innerL, innerB+1, innerL+vsW, innerB+13),
                 "VOL",
                 IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
 
-            float kGap = 18.0f;
-            float kX   = innerL + vsW + kGap;
-            float kW   = 68.0f, kH = 90.0f;
-            float kY   = innerT;
-
-            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kHpFreq, "HP", CT::knobGrey);
-            kX += kW + 12.0f;
-            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kLpFreq, "LP", CT::knobGrey);
+            // BandFilterSlider for output HP/LP (vertical, beside vol)
+            const float bfsW=36.0f;
+            const float bfsX=innerL+vsW+10.0f;
+            g->AttachControl(new BandFilterSlider(
+                IRECT(bfsX, innerT, bfsX+bfsW, innerB),
+                kHpFreq, kLpFreq));
+            g->AttachControl(new ITextControl(
+                IRECT(bfsX-2, boxOutput.T+3, bfsX+bfsW+2, boxOutput.T+16),
+                "FILTER",
+                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
         }
-
-        // ── Footer: folder path ───────────────────────────────────────────────
-        g->AttachControl(new ITextControl(
-            IRECT(full.L+12, full.B-20, full.R-12, full.B),
-            mLibrary.getFolder().empty() ? "no folder selected" : mLibrary.getFolder().c_str(),
-            IText(10.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
     };
 #endif
 }
@@ -301,7 +293,6 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
         mVoiceTimer++;
     }
 
-    // Apply macro links and build effects parameters
     const float macro = (float)GetParam(kMacro)->GetNormalized();
     auto applyMacro = [&](int idx) -> float {
         auto* p = GetParam(idx);
@@ -313,11 +304,13 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
 
     EffectsParameters ep;
     ep.reverbAmount  = applyMacro(kReverbAmount);
+    ep.reverbDecay   = applyMacro(kReverbDecay);
     ep.distAmount    = applyMacro(kDistAmount);
     ep.distMode      = (int)GetParam(kDistMode)->Value();
     ep.delaySyncMode = (int)GetParam(kDelaySyncMode)->Value();
     ep.delayTimeMs   = applyMacro(kDelayTimeMs);
     ep.delayFeedback = applyMacro(kDelayFeedback);
+    ep.delayMix      = applyMacro(kDelayMix);
     ep.delayLowcut   = applyMacro(kDelayLowcut);
     ep.delayHighcut  = applyMacro(kDelayHighcut);
     ep.chorusAmount  = applyMacro(kChorusAmount);
@@ -329,7 +322,6 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     mFX.setParameters(ep);
     mFX.process(mTmpL, mTmpR, n);
 
-    // VU peak measurement (post-effects)
     float peakL=0, peakR=0;
     for (int i = 0; i < n; i++) {
         outputs[0][i] = (sample)mTmpL[i];
@@ -449,7 +441,6 @@ void COMANCHE::loadSample(int idx)
 
     for (auto& v : mVoices) v.active = false;
 
-    // Auto-load preset if it exists for this sample
     mPresets.onSampleLoaded(path);
     for (auto& kv : mPresets.getValues()) {
         for (int pi = 0; pi < kNumParams; pi++) {

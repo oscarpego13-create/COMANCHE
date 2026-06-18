@@ -50,10 +50,13 @@ void ComanacheReverb::prepare(double sampleRate)
     for (int i=0;i<kA;i++){apL[i].resize((int)(aL[i]*sc));  apR[i].resize((int)(aR[i]*sc));}
 }
 
-void ComanacheReverb::process(float* L, float* R, int n, float amount)
+void ComanacheReverb::process(float* L, float* R, int n, float amount, float decaySec)
 {
     if (amount <= 0.0f) return;
-    const float fb   = 0.88f;   // ~2s RT60 decay
+    // RT60 from requested decay (longest comb = 1617/44100 s at any SR)
+    static constexpr float kLongCombSec = 1617.0f / 44100.0f;
+    float logFb = -3.0f * kLongCombSec / std::max(0.05f, decaySec);
+    const float fb   = std::pow(10.0f, logFb);
     const float damp = 0.30f;
     const float wet  = amount;
     const float dry  = 1.0f - amount;
@@ -131,16 +134,20 @@ void EffectsChain::process(float* outL, float* outR, int n)
     if (n == 0) return;
 
     // 1. Reverb
-    reverb.process(outL, outR, n, params.reverbAmount);
+    reverb.process(outL, outR, n, params.reverbAmount, params.reverbDecay);
 
-    // 2. Distortion
+    // 2. Distortion + subtle output gain compensation
     if (params.distAmount > 0.0f) {
+        const float comp = 1.0f / (1.0f + params.distAmount * 2.5f);
         for (int i=0;i<n;i++) {
+            float dL, dR;
             switch (params.distMode) {
-                case 1: outL[i]=distTape(outL[i],params.distAmount); outR[i]=distTape(outR[i],params.distAmount); break;
-                case 2: outL[i]=distTube(outL[i],params.distAmount); outR[i]=distTube(outR[i],params.distAmount); break;
-                default:outL[i]=distClip(outL[i],params.distAmount); outR[i]=distClip(outR[i],params.distAmount); break;
+                case 1: dL=distTape(outL[i],params.distAmount); dR=distTape(outR[i],params.distAmount); break;
+                case 2: dL=distTube(outL[i],params.distAmount); dR=distTube(outR[i],params.distAmount); break;
+                default:dL=distClip(outL[i],params.distAmount); dR=distClip(outR[i],params.distAmount); break;
             }
+            outL[i] = dL * comp;
+            outR[i] = dR * comp;
         }
     }
 
@@ -164,8 +171,8 @@ void EffectsChain::process(float* outL, float* outR, int n)
             float fbR = dlcR.process(dhcR.process(wL * fb));
             delBufL[delPos] = outL[i] + fbL;
             delBufR[delPos] = outR[i] + fbR;
-            outL[i] += wL;
-            outR[i] += wR;
+            outL[i] += wL * params.delayMix;
+            outR[i] += wR * params.delayMix;
             if (++delPos >= delSize) delPos = 0;
         }
     }
