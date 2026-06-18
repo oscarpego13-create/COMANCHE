@@ -442,13 +442,14 @@ public:
         g.DrawText(vt,vs.Get(),IRECT(mRECT.L,bot+3,mRECT.R,bot+14));
     }
 
-    void OnIdle() override {
+    bool IsDirty() override {
         float nl = mVuL ? mVuL->load() : 0.0f;
         float nr = mVuR ? mVuR->load() : 0.0f;
         if (std::abs(nl-mLastL)>0.005f || std::abs(nr-mLastR)>0.005f) {
             mLastL=nl; mLastR=nr;
-            SetDirty(false);
+            return true;
         }
+        return IControl::IsDirty();
     }
 
     void OnAttached() override { if (GetParam()) SetValue(GetParam()->GetNormalized()); }
