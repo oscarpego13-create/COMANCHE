@@ -192,27 +192,107 @@ private:
     int mMode; const char* mLabel;
 };
 
-// ─── Single cycling button for delay sync mode ────────────────────────────────
-class SyncCycleButton final : public IControl
+// ─── TEMPO toggle button (on=black/sync, off=grey/free) ──────────────────────
+class TempoToggleButton final : public IControl
 {
 public:
-    SyncCycleButton(const IRECT& b, int param, std::vector<std::string> labels)
-        : IControl(b, param), mLabels(std::move(labels)) {}
+    TempoToggleButton(const IRECT& b, int param) : IControl(b, param) {}
     void OnAttached() override { if(GetParam()) SetValue(GetParam()->GetNormalized()); }
     void Draw(IGraphics& g) override {
-        int mode=std::clamp((int)(GetParam()->Value()+0.5),0,(int)mLabels.size()-1);
-        bool active=(mode>0);
-        g.FillRoundRect(active?CT::btnActive:CT::btnInactive, mRECT, 3.0f);
-        IText t(9.0f, active?CT::textLight:CT::fgPrimary,"RobotoMono",EAlign::Center,EVAlign::Middle);
-        g.DrawText(t, mLabels[mode].c_str(), mRECT);
+        bool on = (GetParam() && GetParam()->Value() > 0.5);
+        g.FillRoundRect(on ? CT::btnActive : IColor(255,170,165,158), mRECT, 3.0f);
+        IText t(9.0f, on ? CT::textLight : CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        g.DrawText(t, "TEMPO", mRECT);
     }
     void OnMouseDown(float,float,const IMouseMod&) override {
-        int cur=std::clamp((int)(GetParam()->Value()+0.5),0,(int)mLabels.size()-1);
-        int next=(cur+1)%(int)mLabels.size();
-        SetValue(GetParam()->ToNormalized((double)next)); SetDirty(true);
+        bool on = (GetParam() && GetParam()->Value() > 0.5);
+        SetValue(on ? 0.0 : 1.0); SetDirty(true);
     }
+};
+
+// ─── Delay TIME knob: ms display when free, note-division when sync on ────────
+class DelayTimeKnob final : public IControl
+{
+    static constexpr const char* kSubLabels[5] = {"1/4","1/8","1/16","1/4T","1/8T"};
+    static int stepFromMs(float ms) { return std::clamp((int)(ms / 400.0f), 0, 4); }
+    static double centerMsForStep(int s) { return s * 400.0 + 200.0; }
+
+public:
+    DelayTimeKnob(const IRECT& b, IColor fill)
+        : IControl(b, kDelayTimeMs), mFill(fill) {}
+
+    bool IsDirty() override {
+        int cur = (int)(GetDelegate()->GetParam(kDelaySyncMode)->Value() + 0.5);
+        if (cur != mLastSync) { mLastSync = cur; return true; }
+        return IControl::IsDirty();
+    }
+
+    void Draw(IGraphics& g) override {
+        const float cx  = mRECT.MW();
+        const float kR  = 0.35f * mRECT.W();
+        const float kCy = mRECT.T + kR + 4.0f;
+        static const IColor kNeedle(255,26,26,26);
+        g.FillCircle(mFill,   cx, kCy, kR);
+        g.DrawCircle(kNeedle, cx, kCy, kR-0.5f, nullptr, 1.8f);
+
+        double baseNorm = GetParam() ? GetParam()->GetNormalized() : GetValue();
+        double angle = (-135.0 + baseNorm*270.0) * (M_PI/180.0);
+        g.DrawLine(kNeedle, cx, kCy,
+                   cx+(float)(std::sin(angle)*(kR-0.5f)),
+                   kCy-(float)(std::cos(angle)*(kR-0.5f)), nullptr, 2.2f);
+
+        // Value label: ms or note division
+        bool syncOn = (GetDelegate()->GetParam(kDelaySyncMode)->Value() > 0.5);
+        char valBuf[16];
+        if (!syncOn) {
+            WDL_String vs; GetParam()->GetDisplay(vs, false);
+            snprintf(valBuf, sizeof(valBuf), "%s ms", vs.Get());
+        } else {
+            snprintf(valBuf, sizeof(valBuf), "%s", kSubLabels[stepFromMs((float)GetParam()->Value())]);
+        }
+        IText vt(11.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        g.DrawText(vt, valBuf, IRECT(mRECT.L, kCy+kR+2, mRECT.R, kCy+kR+17));
+        IText lt(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        g.DrawText(lt, "TIME", IRECT(mRECT.L, kCy+kR+17, mRECT.R, kCy+kR+31));
+    }
+
+    void OnAttached() override { if(GetParam()) SetValue(GetParam()->GetNormalized()); }
+
+    void OnMouseDown(float, float y, const IMouseMod& m) override
+        { mDY=y; mSV=GetValue(); IControl::OnMouseDown(0,y,m); }
+
+    void OnMouseDblClick(float, float, const IMouseMod&) override
+        { SetValue(GetParam()->GetDefault(true)); SetDirty(true); }
+
+    void OnMouseDrag(float, float y, float, float, const IMouseMod& m) override {
+        bool syncOn = (GetDelegate()->GetParam(kDelaySyncMode)->Value() > 0.5);
+        double s = m.S ? 2000.0 : 200.0;
+        double raw = std::clamp(mSV - (y-mDY)/s, 0.0, 1.0);
+        if (!syncOn) {
+            SetValue(raw);
+        } else {
+            int step = std::clamp((int)(raw * 5.0), 0, 4);
+            SetValue(GetParam()->ToNormalized(centerMsForStep(step)));
+        }
+        SetDirty(true);
+    }
+
+    void OnMouseWheel(float, float, const IMouseMod& m, float d) override {
+        bool syncOn = (GetDelegate()->GetParam(kDelaySyncMode)->Value() > 0.5);
+        if (!syncOn) {
+            SetValue(std::clamp(GetValue()+d*(m.S?0.002:0.01),0.0,1.0));
+        } else {
+            int step = stepFromMs((float)GetParam()->Value());
+            step = std::clamp(step + (d > 0 ? 1 : -1), 0, 4);
+            SetValue(GetParam()->ToNormalized(centerMsForStep(step)));
+        }
+        SetDirty(true);
+    }
+
 private:
-    std::vector<std::string> mLabels;
+    IColor mFill;
+    float mDY{0}; double mSV{0};
+    mutable int mLastSync{-1};
 };
 
 // ─── Scrollable sample list with scrollbar ───────────────────────────────────

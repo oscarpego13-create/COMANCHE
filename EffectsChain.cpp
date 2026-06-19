@@ -109,15 +109,17 @@ float EffectsChain::readBuf(const std::vector<float>& b, int wp, float delay) co
 float EffectsChain::delayTimeSamples() const
 {
     if (params.delaySyncMode == 0) return params.delayTimeMs * 0.001f * (float)sr;
+    // Sync on: delayTimeMs (1..2000) is divided into 5 equal bands → note divisions
     double bps = params.bpm / 60.0;
-    double sec = 0.5 / bps;
-    switch (params.delaySyncMode) {
-        case 1: sec = 1.0/bps;         break;
-        case 2: sec = 0.5/bps;         break;
-        case 3: sec = 0.25/bps;        break;
-        case 4: sec = (2.0/3.0)/bps;   break;
-        case 5: sec = (1.0/3.0)/bps;   break;
-        default: break;
+    int step = std::clamp((int)(params.delayTimeMs / 400.0f), 0, 4);
+    double sec;
+    switch (step) {
+        case 0: sec = 1.0/bps;         break; // 1/4
+        case 1: sec = 0.5/bps;         break; // 1/8
+        case 2: sec = 0.25/bps;        break; // 1/16
+        case 3: sec = (2.0/3.0)/bps;   break; // 1/4T
+        case 4: sec = (1.0/3.0)/bps;   break; // 1/8T
+        default: sec = 0.5/bps;        break;
     }
     return (float)(sec * sr);
 }

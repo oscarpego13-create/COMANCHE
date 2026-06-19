@@ -15,7 +15,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kReverbDecay)  ->InitDouble("ReverbDecay", 2.0,     0.3,   8.0,    0.01, "s");
     GetParam(kDistAmount)   ->InitDouble("Dist",        0.0,     0.0,   1.0,    0.001);
     GetParam(kDistMode)     ->InitEnum  ("DistMode",    0,       3,     "", 0, "", "CLIP","TAPE","TUBE");
-    GetParam(kDelaySyncMode)->InitEnum  ("DelaySync",   0,       6,     "", 0, "", "FREE","1/4","1/8","1/16","1/4T","1/8T");
+    GetParam(kDelaySyncMode)->InitDouble ("DelaySync",   0,       0,     1,  1);
     GetParam(kDelayTimeMs)  ->InitDouble("DelayTime",   500.0,   1.0,   2000.0, 1.0,  "ms");
     GetParam(kDelayFeedback)->InitDouble("DelayFb",     0.35,    0.0,   0.97,   0.001);
     GetParam(kDelayMix)     ->InitDouble("DelayMix",    0.0,     0.0,   1.0,    0.001);
@@ -46,7 +46,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         const IRECT hdr(full.L, full.T, full.R, full.T + 32.0f);
         g->AttachControl(new ITextControl(
             IRECT(hdr.L+12, hdr.T, hdr.L+240, hdr.B),
-            "comanche  \xc2\xb7  v1.1",
+            "comanche v1.0",
             IText(12.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
 
         // ── Left panel (260px): folder button + save icon + sample list ───────
@@ -196,15 +196,14 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             const float kXb = kXa + kW + 8.0f;     // FEEDBACK knob
             const float kXc = kXb + kW + 16.0f;    // MIX / Cantidad knob
 
-            addKnob(IRECT(kXa,kY,kXa+kW,kY+kH), kDelayTimeMs,   "TIME",    CT::knobGrey);
+            g->AttachControl(new DelayTimeKnob(IRECT(kXa,kY,kXa+kW,kY+kH), CT::knobGrey));
             addKnob(IRECT(kXb,kY,kXb+kW,kY+kH), kDelayFeedback, "FEEDBK",  CT::knobGrey);
             addKnob(IRECT(kXc,kY,kXc+kW,kY+kH), kDelayMix,      "Cantidad",CT::knobBlue);
 
-            // Single cycling SYNC button below TIME knob (NoisePanner style)
+            // TEMPO toggle button below TIME knob
             const float sbT = kY + kH + 4.0f;
-            g->AttachControl(new SyncCycleButton(
-                IRECT(kXa, sbT, kXa+kW, sbT+18.0f),
-                kDelaySyncMode, {"FREE","1/4","1/8","1/16","1/4T","1/8T"}));
+            g->AttachControl(new TempoToggleButton(
+                IRECT(kXa, sbT, kXa+kW, sbT+18.0f), kDelaySyncMode));
 
             // BandFilterSlider for delay filter (right portion)
             const float bfsW=36, bfsH=boxH-28.0f;
