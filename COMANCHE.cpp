@@ -475,12 +475,8 @@ void COMANCHE::loadSample(int idx)
             }
         }
     }
-    // Push updated param values to all UI controls so knob positions match
-    if (GetUI()) {
-        for (int pi = 0; pi < kNumParams; pi++)
-            GetUI()->SetParameterValueFromDelegate(pi, GetParam(pi)->GetNormalized());
-        GetUI()->SetAllControlsDirty();
-    }
+    // Knobs/sliders read from GetParam()->GetNormalized() directly in Draw(), so dirty is enough
+    if (GetUI()) GetUI()->SetAllControlsDirty();
 }
 
 void COMANCHE::savePreset()
@@ -512,11 +508,7 @@ void COMANCHE::resetPresetForSample(int idx)
     if (idx == mSelectedIdx) {
         for (int pi = 0; pi < kNumParams; pi++)
             GetParam(pi)->SetNormalized(GetParam(pi)->GetDefault(true));
-        if (GetUI()) {
-            for (int pi = 0; pi < kNumParams; pi++)
-                GetUI()->SetParameterValueFromDelegate(pi, GetParam(pi)->GetNormalized());
-            GetUI()->SetAllControlsDirty();
-        }
+        if (GetUI()) GetUI()->SetAllControlsDirty();
     }
 }
 

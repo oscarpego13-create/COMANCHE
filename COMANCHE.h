@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <memory>
 
 #include "EffectsChain.h"
 #include "SampleLibrary.h"
@@ -116,7 +117,7 @@ public:
         g.FillCircle(mFill,   cx, kCy, kR);
         g.DrawCircle(kNeedle, cx, kCy, kR-0.5f, nullptr, 1.8f);
 
-        double baseNorm = GetValue();
+        double baseNorm = GetParam() ? GetParam()->GetNormalized() : GetValue();
         double angle = (-135.0 + baseNorm*270.0) * (M_PI/180.0);
         float  reach = kR - 0.5f;
         g.DrawLine(kNeedle, cx, kCy,
@@ -256,10 +257,10 @@ public:
         if (mod.R) {
             if (row>=0&&row<total()) {
                 mContextRow=row;
-                mContextMenu=IPopupMenu();
-                mContextMenu.AddItem("Eliminar Sonido");
-                mContextMenu.AddItem("Eliminar Preset");
-                GetUI()->CreatePopupMenu(*this, mContextMenu, IRECT(x,y,x+1,y+1));
+                mContextMenu = std::make_unique<IPopupMenu>();
+                mContextMenu->AddItem("Eliminar Sonido");
+                mContextMenu->AddItem("Eliminar Preset");
+                GetUI()->CreatePopupMenu(*this, *mContextMenu, IRECT(x,y,x+1,y+1));
             }
             return;
         }
@@ -303,7 +304,7 @@ private:
     OnDropFn        mDropFn;
     OnRemoveFn      mRemoveFn;
     OnResetPresetFn mResetPresetFn;
-    IPopupMenu mContextMenu;
+    std::unique_ptr<IPopupMenu> mContextMenu;
     int mContextRow{-1};
     int mScroll{0}; bool mSbDrag{false}; float mSbY{0};
 };
@@ -482,7 +483,7 @@ public:
     }
 
     void Draw(IGraphics& g) override {
-        float val=(float)GetValue();
+        float val = GetParam() ? (float)GetParam()->GetNormalized() : (float)GetValue();
         float linL=mVuL?mVuL->load():0.0f;
         float linR=mVuR?mVuR->load():0.0f;
 
