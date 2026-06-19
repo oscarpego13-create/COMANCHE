@@ -136,9 +136,9 @@ void EffectsChain::process(float* outL, float* outR, int n)
     // 1. Reverb
     reverb.process(outL, outR, n, params.reverbAmount, params.reverbDecay);
 
-    // 2. Distortion + subtle output gain compensation
+    // 2. Distortion + gain compensation + tape HF rolloff
     if (params.distAmount > 0.0f) {
-        const float comp = 1.0f / (1.0f + params.distAmount * 2.5f);
+        const float comp = 1.0f / (1.0f + params.distAmount * 4.0f);
         for (int i=0;i<n;i++) {
             float dL, dR;
             switch (params.distMode) {
@@ -148,6 +148,19 @@ void EffectsChain::process(float* outL, float* outR, int n)
             }
             outL[i] = dL * comp;
             outR[i] = dR * comp;
+        }
+        // TAPE: progressive HF loss (cutoff falls from 20kHz→3kHz as dist increases)
+        if (params.distMode == 1) {
+            float fc = 20000.0f * std::pow(0.15f, params.distAmount);
+            fc = std::max(fc, 3000.0f);
+            if (std::abs(fc - lastTapeHfFreq) > 20.0f) {
+                tapeHfL = tapeHfR = Biquad::makeLP(sr, fc);
+                lastTapeHfFreq = fc;
+            }
+            for (int i=0;i<n;i++) {
+                outL[i] = tapeHfL.process(outL[i]);
+                outR[i] = tapeHfR.process(outR[i]);
+            }
         }
     }
 

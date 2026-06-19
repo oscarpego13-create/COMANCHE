@@ -19,6 +19,13 @@ std::string SampleLibrary::getSamplePath(int index) const
     return {};
 }
 
+void SampleLibrary::removeAt(int idx)
+{
+    if (idx < 0 || idx >= (int)samplePaths.size()) return;
+    samplePaths.erase(samplePaths.begin() + idx);
+    sampleNames.erase(sampleNames.begin() + idx);
+}
+
 void SampleLibrary::scan()
 {
     samplePaths.clear();

@@ -19,6 +19,9 @@ public:
                     int& numChannels,
                     double& sampleRate);
 
+    // Remove entry from the in-memory list (does NOT delete the file)
+    void removeAt(int idx);
+
 private:
     std::string              currentFolder;
     std::vector<std::string> samplePaths;

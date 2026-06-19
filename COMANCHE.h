@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <functional>
 
@@ -190,13 +191,41 @@ private:
     int mMode; const char* mLabel;
 };
 
+// ─── Single cycling button for delay sync mode ────────────────────────────────
+class SyncCycleButton final : public IControl
+{
+public:
+    SyncCycleButton(const IRECT& b, int param, std::vector<std::string> labels)
+        : IControl(b, param), mLabels(std::move(labels)) {}
+    void OnAttached() override { if(GetParam()) SetValue(GetParam()->GetNormalized()); }
+    void Draw(IGraphics& g) override {
+        int mode=std::clamp((int)(GetParam()->Value()+0.5),0,(int)mLabels.size()-1);
+        bool active=(mode>0);
+        g.FillRoundRect(active?CT::btnActive:CT::btnInactive, mRECT, 3.0f);
+        IText t(9.0f, active?CT::textLight:CT::fgPrimary,"RobotoMono",EAlign::Center,EVAlign::Middle);
+        g.DrawText(t, mLabels[mode].c_str(), mRECT);
+    }
+    void OnMouseDown(float,float,const IMouseMod&) override {
+        int cur=std::clamp((int)(GetParam()->Value()+0.5),0,(int)mLabels.size()-1);
+        int next=(cur+1)%(int)mLabels.size();
+        SetValue(GetParam()->ToNormalized((double)next)); SetDirty(true);
+    }
+private:
+    std::vector<std::string> mLabels;
+};
+
 // ─── Scrollable sample list with scrollbar ───────────────────────────────────
 class SampleListControl final : public IControl
 {
 public:
-    using OnDropFn = std::function<void(const std::string&)>;
-    SampleListControl(const IRECT& b, const std::vector<std::string>& names, int& sel, OnDropFn dropFn={})
-        : IControl(b, kNoParameter), mNames(names), mSelected(sel), mDropFn(std::move(dropFn)) {}
+    using OnDropFn        = std::function<void(const std::string&)>;
+    using OnRemoveFn      = std::function<void(int)>;
+    using OnResetPresetFn = std::function<void(int)>;
+
+    SampleListControl(const IRECT& b, const std::vector<std::string>& names, int& sel,
+                      OnDropFn dropFn={}, OnRemoveFn removeFn={}, OnResetPresetFn resetFn={})
+        : IControl(b, kNoParameter), mNames(names), mSelected(sel),
+          mDropFn(std::move(dropFn)), mRemoveFn(std::move(removeFn)), mResetPresetFn(std::move(resetFn)) {}
 
     void Draw(IGraphics& g) override {
         const float sbW=12.0f, rowH=22.0f;
@@ -221,15 +250,32 @@ public:
             g.FillRoundRect(IColor(255,190,185,180), IRECT(sbR.L+2,ty,sbR.R-2,ty+thumbH), 5.0f);
         }
     }
-    void OnMouseDown(float x, float y, const IMouseMod&) override {
+    void OnMouseDown(float x, float y, const IMouseMod& mod) override {
         const float sbW=12.0f, rowH=22.0f;
-        if (x>=mRECT.R-sbW){mSbDrag=true;mSbY=y;return;}
         int row=mScroll+(int)((y-mRECT.T)/rowH);
+        if (mod.R) {
+            if (row>=0&&row<total()) {
+                mContextRow=row;
+                mContextMenu=IPopupMenu();
+                mContextMenu.AddItem("Eliminar Sonido");
+                mContextMenu.AddItem("Eliminar Preset");
+                GetUI()->CreatePopupMenu(*this, mContextMenu, IRECT(x,y,x+1,y+1));
+            }
+            return;
+        }
+        if (x>=mRECT.R-sbW){mSbDrag=true;mSbY=y;return;}
         if (row>=0&&row<total()){
             mSelected=row;
             GetDelegate()->SendArbitraryMsgFromUI(kMsgLoadSample,kNoTag,sizeof(int),&mSelected);
             SetDirty(false);
         }
+    }
+    void OnPopupMenuSelection(IPopupMenu* pMenu, int) override {
+        if (!pMenu) return;
+        int chosen = pMenu->GetChosenItemIdx();
+        if (chosen==0 && mRemoveFn)      mRemoveFn(mContextRow);
+        else if (chosen==1 && mResetPresetFn) mResetPresetFn(mContextRow);
+        SetDirty(false);
     }
     void OnMouseUp(float,float,const IMouseMod&) override {mSbDrag=false;}
     void OnMouseDrag(float,float y,float,float dy,const IMouseMod&) override {
@@ -254,17 +300,32 @@ public:
 private:
     int total() const {return (int)mNames.size();}
     const std::vector<std::string>& mNames; int& mSelected;
-    OnDropFn mDropFn;
+    OnDropFn        mDropFn;
+    OnRemoveFn      mRemoveFn;
+    OnResetPresetFn mResetPresetFn;
+    IPopupMenu mContextMenu;
+    int mContextRow{-1};
     int mScroll{0}; bool mSbDrag{false}; float mSbY{0};
 };
 
-// ─── Save icon button (floppy disk) ──────────────────────────────────────────
+// ─── Save icon button (floppy disk) with 2s confirmation tick ────────────────
 class SaveIconButton final : public IControl
 {
 public:
     using OnClickFn = std::function<void()>;
     SaveIconButton(const IRECT& b, OnClickFn fn)
         : IControl(b, kNoParameter), mFn(std::move(fn)) {}
+
+    bool IsDirty() override {
+        if (mShowTick) {
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - mSavedAt).count();
+            if (ms > 2000) mShowTick = false;
+            return true;
+        }
+        return IControl::IsDirty();
+    }
+
     void Draw(IGraphics& g) override {
         g.FillRoundRect(CT::btnInactive, mRECT, 3.0f);
         float L=mRECT.L+3,T=mRECT.T+3,R=mRECT.R-3,B=mRECT.B-3,W=R-L,H=B-T;
@@ -279,10 +340,25 @@ public:
         float sl=L+W*0.22f,sr=R-W*0.22f;
         g.FillRect(IColor(255,190,188,182), IRECT(sl,T+H*0.52f,sr,B-1));
         g.DrawRect(kI, IRECT(sl,T+H*0.52f,sr,B-1), nullptr,1.0f);
+        // Green tick overlay for 2 seconds after save
+        if (mShowTick) {
+            float cx=mRECT.R-7, cy=mRECT.T+7;
+            g.FillCircle(IColor(240,45,195,75), cx, cy, 6.5f);
+            g.DrawLine(IColor(255,255,255,255), cx-3.5f,cy+0.5f, cx-1.0f,cy+3.0f, nullptr,2.0f);
+            g.DrawLine(IColor(255,255,255,255), cx-1.0f,cy+3.0f, cx+3.5f,cy-2.5f, nullptr,2.0f);
+        }
     }
-    void OnMouseDown(float,float,const IMouseMod&) override {if(mFn)mFn();}
+    void OnMouseDown(float,float,const IMouseMod&) override {
+        if (mFn) {
+            mFn();
+            mSavedAt = std::chrono::steady_clock::now();
+            mShowTick = true;
+        }
+    }
 private:
     OnClickFn mFn;
+    bool mShowTick{false};
+    std::chrono::steady_clock::time_point mSavedAt;
 };
 
 // ─── Vertical band filter slider (HP/LP range selector) ──────────────────────
@@ -512,6 +588,10 @@ public:
     std::atomic<float> mVuPeakL{0.0f}, mVuPeakR{0.0f};
     void loadSample(int idx);
     void savePreset();
+    void removeFromLibrary(int idx);
+    void resetPresetForSample(int idx);
+    void savePersistentState() const;
+    void loadPersistentState();
 private:
     struct Voice {
         bool   active{false},inRelease{false};

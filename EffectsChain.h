@@ -105,6 +105,10 @@ private:
     int choPos{0}, choSize{0};
     float choPhase{0.0f};
 
+    // Tape HF rolloff (progressive LP as dist increases)
+    Biquad tapeHfL, tapeHfR;
+    float lastTapeHfFreq{-1};
+
     // Output filters
     Biquad hpL, hpR, lpL, lpR;
     float lastHpFreq{-1}, lastLpFreq{-1};

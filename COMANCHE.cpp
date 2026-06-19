@@ -2,6 +2,10 @@
 #include "IPlug_include_in_plug_src.h"
 #include "IControls.h"
 
+#include <filesystem>
+#include <fstream>
+namespace fs = std::filesystem;
+
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 COMANCHE::COMANCHE(const InstanceInfo& info)
@@ -14,7 +18,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kDelaySyncMode)->InitEnum  ("DelaySync",   0,       6,     "", 0, "", "FREE","1/4","1/8","1/16","1/4T","1/8T");
     GetParam(kDelayTimeMs)  ->InitDouble("DelayTime",   500.0,   1.0,   2000.0, 1.0,  "ms");
     GetParam(kDelayFeedback)->InitDouble("DelayFb",     0.35,    0.0,   0.97,   0.001);
-    GetParam(kDelayMix)     ->InitDouble("DelayMix",    0.5,     0.0,   1.0,    0.001);
+    GetParam(kDelayMix)     ->InitDouble("DelayMix",    0.0,     0.0,   1.0,    0.001);
     GetParam(kDelayLowcut)  ->InitDouble("DelayLo",     20.0,    20.0,  500.0,  1.0,  "Hz");
     GetParam(kDelayHighcut) ->InitDouble("DelayHi",     18000.0, 2000.0,18000.0,1.0,  "Hz");
     GetParam(kChorusAmount) ->InitDouble("Chorus",      0.0,     0.0,   1.0,    0.001);
@@ -22,6 +26,8 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kLpFreq)       ->InitDouble("LP",          20000.0, 500.0, 20000.0,1.0,  "Hz");
     GetParam(kOutputVol)    ->InitDouble("OutVol",      0.0,   -60.0,   6.0,    0.1, "dB");
     GetParam(kMacro)        ->InitDouble("Macro",       0.0,     0.0,   1.0,    0.001);
+
+    loadPersistentState();
 
 #if IPLUG_EDITOR
     mMakeGraphicsFunc = [&]() {
@@ -61,6 +67,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
                     if (path.GetLength() > 0) {
                         mFolderPath = path.Get();
                         mLibrary.setFolder(mFolderPath);
+                        savePersistentState();
                         if (GetUI()) GetUI()->SetAllControlsDirty();
                     }
                 });
@@ -72,19 +79,23 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 
         const IRECT listR(lp.L+2, btnRowB+4, lp.R-2, panelB-2);
         g->AttachControl(new SampleListControl(listR, mLibrary.getSampleNames(), mSelectedIdx,
+            // OnDrop
             [this](const std::string& filePath) {
-                // Find the parent folder of the dropped file and set it as library root
                 size_t slash = filePath.find_last_of("/\\");
                 if (slash == std::string::npos) return;
                 mFolderPath = filePath.substr(0, slash);
                 mLibrary.setFolder(mFolderPath);
-                // Auto-select and load the dropped file
-                auto& names = mLibrary.getSampleNames();
-                for (int i = 0; i < (int)names.size(); i++) {
+                savePersistentState();
+                for (int i = 0; i < (int)mLibrary.getSampleNames().size(); i++) {
                     if (mLibrary.getSamplePath(i) == filePath) { loadSample(i); break; }
                 }
                 if (GetUI()) GetUI()->SetAllControlsDirty();
-            }));
+            },
+            // OnRemove (right-click → "Eliminar Sonido")
+            [this](int idx) { removeFromLibrary(idx); },
+            // OnResetPreset (right-click → "Eliminar Preset")
+            [this](int idx) { resetPresetForSample(idx); }
+        ));
 
         // ── Right panel ────────────────────────────────────────────────────────
         const IRECT rp(full.L+260.0f, panelT, full.R, panelB);
@@ -189,16 +200,11 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             addKnob(IRECT(kXb,kY,kXb+kW,kY+kH), kDelayFeedback, "FEEDBK",  CT::knobGrey);
             addKnob(IRECT(kXc,kY,kXc+kW,kY+kH), kDelayMix,      "Cantidad",CT::knobBlue);
 
-            // Sync mode buttons (2 cols × 3 rows) below TIME/FEEDBACK
-            const float sbBtnW=42, sbBtnH=14, sbBtnGap=2;
-            const float sbT = kY + kH + 2.0f;
-            const char* syncLabels[] = {"FREE","1/4","1/8","1/16","1/4T","1/8T"};
-            for (int i=0;i<6;i++) {
-                int col=i%2, row=i/2;
-                float sx=kXa+col*(sbBtnW+sbBtnGap), sy=sbT+row*(sbBtnH+sbBtnGap);
-                g->AttachControl(new ModeButton(IRECT(sx,sy,sx+sbBtnW,sy+sbBtnH),
-                    kDelaySyncMode, i, syncLabels[i]));
-            }
+            // Single cycling SYNC button below TIME knob (NoisePanner style)
+            const float sbT = kY + kH + 4.0f;
+            g->AttachControl(new SyncCycleButton(
+                IRECT(kXa, sbT, kXa+kW, sbT+18.0f),
+                kDelaySyncMode, {"FREE","1/4","1/8","1/16","1/4T","1/8T"}));
 
             // BandFilterSlider for delay filter (right portion)
             const float bfsW=36, bfsH=boxH-28.0f;
@@ -456,8 +462,7 @@ void COMANCHE::loadSample(int idx)
 
     for (auto& v : mVoices) v.active = false;
 
-    // Always reset params to defaults first, then overlay saved preset (if any).
-    // This ensures switching to an unsaved oneshot gives a clean slate.
+    // Reset to defaults, then restore saved preset (if any)
     mPresets.onSampleLoaded(path);
     for (int pi = 0; pi < kNumParams; pi++)
         GetParam(pi)->SetNormalized(GetParam(pi)->GetDefault(true));
@@ -470,7 +475,12 @@ void COMANCHE::loadSample(int idx)
             }
         }
     }
-    if (GetUI()) GetUI()->SetAllControlsDirty();
+    // Push updated param values to all UI controls so knob positions match
+    if (GetUI()) {
+        for (int pi = 0; pi < kNumParams; pi++)
+            GetUI()->SetParameterValueFromDelegate(pi, GetParam(pi)->GetNormalized());
+        GetUI()->SetAllControlsDirty();
+    }
 }
 
 void COMANCHE::savePreset()
@@ -481,4 +491,70 @@ void COMANCHE::savePreset()
         vals[p->GetName()] = (float)p->Value();
     }
     mPresets.save(vals);
+}
+
+void COMANCHE::removeFromLibrary(int idx)
+{
+    mLibrary.removeAt(idx);
+    if (mSelectedIdx == idx) mSelectedIdx = -1;
+    else if (mSelectedIdx > idx) mSelectedIdx--;
+    if (GetUI()) GetUI()->SetAllControlsDirty();
+}
+
+void COMANCHE::resetPresetForSample(int idx)
+{
+    std::string path = mLibrary.getSamplePath(idx);
+    if (path.empty()) return;
+    // Point preset manager at this sample and delete its preset file
+    mPresets.onSampleLoaded(path);
+    mPresets.deletePreset();
+    // If this is the currently loaded sample, reset params to defaults
+    if (idx == mSelectedIdx) {
+        for (int pi = 0; pi < kNumParams; pi++)
+            GetParam(pi)->SetNormalized(GetParam(pi)->GetDefault(true));
+        if (GetUI()) {
+            for (int pi = 0; pi < kNumParams; pi++)
+                GetUI()->SetParameterValueFromDelegate(pi, GetParam(pi)->GetNormalized());
+            GetUI()->SetAllControlsDirty();
+        }
+    }
+}
+
+// ─── Cross-session persistence (independent of DAW project) ──────────────────
+
+static std::string persistStatePath()
+{
+    const char* home = getenv("HOME");
+    if (!home) return {};
+    return std::string(home) + "/Library/Application Support/COMANCHE/session.json";
+}
+
+void COMANCHE::savePersistentState() const
+{
+    std::string p = persistStatePath();
+    if (p.empty()) return;
+    fs::create_directories(fs::path(p).parent_path());
+    std::ofstream f(p);
+    if (!f.is_open()) return;
+    // Escape backslashes in path (macOS paths won't have them, but just in case)
+    std::string escaped;
+    for (char c : mFolderPath) { if (c == '"' || c == '\\') escaped += '\\'; escaped += c; }
+    f << "{\"folder\":\"" << escaped << "\"}";
+}
+
+void COMANCHE::loadPersistentState()
+{
+    std::string p = persistStatePath();
+    if (p.empty()) return;
+    std::ifstream f(p);
+    if (!f.is_open()) return;
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    size_t a = text.find("\"folder\":\"");
+    if (a == std::string::npos) return;
+    a += 10;
+    size_t b = text.find('"', a);
+    if (b == std::string::npos) return;
+    mFolderPath = text.substr(a, b - a);
+    if (!mFolderPath.empty() && fs::is_directory(mFolderPath))
+        mLibrary.setFolder(mFolderPath);
 }
