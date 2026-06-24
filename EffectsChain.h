@@ -74,6 +74,7 @@ struct EffectsParameters {
     float  hpFreq        { 20.0f };
     float  lpFreq        { 20000.0f };
     float  outputVol     { 1.0f };
+    float  macroModAmount{ 0.0f };
     double bpm           { 120.0 };
 };
 
@@ -99,6 +100,13 @@ private:
 
     Biquad dlcL, dlcR, dhcL, dhcR;
     float lastDlcFreq{-1}, lastDhcFreq{-1};
+
+    // Bitcrush on delay return (SR reduction at 2x delayHighcut)
+    Biquad bcLpL, bcLpR;          // LP to clean up bitcrush aliases (same freq as dhc)
+    float bcHoldL{0}, bcHoldR{0};
+    float bcCountL{0}, bcCountR{0};
+    // Delay return pitch vibrato (macro-driven)
+    float vibratoPhase{0};
 
     // Chorus
     std::vector<float> choBufL, choBufR;

@@ -96,14 +96,19 @@ class ComanacheKnob final : public IControl
 {
 public:
     ComanacheKnob(const IRECT& b, int param, const char* lbl,
-                  IColor fill, bool isMacro=false, int* linkState=nullptr)
+                  IColor fill, bool isMacro=false, int* linkState=nullptr,
+                  const float* modArray=nullptr)
         : IControl(b, param), mLabel(lbl), mFill(fill),
-          mIsMacro(isMacro), mLinkState(linkState) {}
+          mIsMacro(isMacro), mLinkState(linkState), mModArray(modArray) {}
 
     bool IsDirty() override {
         if (!mIsMacro && mLinkState && *mLinkState != 0) {
             float m = (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
             if (std::abs(m - mLastMacro) > 0.001f) { mLastMacro = m; return true; }
+        }
+        if (!mIsMacro && mModArray) {
+            float mod = mModArray[GetParamIdx()];
+            if (std::abs(mod - mLastMod) > 0.001f) { mLastMod = mod; return true; }
         }
         return IControl::IsDirty();
     }
@@ -118,6 +123,9 @@ public:
         g.DrawCircle(kNeedle, cx, kCy, kR-0.5f, nullptr, 1.8f);
 
         double baseNorm = GetParam() ? GetParam()->GetNormalized() : GetValue();
+        // Apply slow LFO modulation to needle position (driven by Macro)
+        if (!mIsMacro && mModArray)
+            baseNorm = std::clamp(baseNorm + (double)mModArray[GetParamIdx()], 0.0, 1.0);
         double angle = (-135.0 + baseNorm*270.0) * (M_PI/180.0);
         float  reach = kR - 0.5f;
         g.DrawLine(kNeedle, cx, kCy,
@@ -169,8 +177,10 @@ public:
     }
 private:
     const char* mLabel; IColor mFill; bool mIsMacro; int* mLinkState;
+    const float* mModArray;
     float mDY{0}; double mSV{0};
     mutable float mLastMacro{-1.0f};
+    mutable float mLastMod{0.0f};
 };
 
 // ─── Mode toggle button ───────────────────────────────────────────────────────
@@ -667,6 +677,9 @@ public:
     int mSelectedIdx{-1};
     int mMacroLink[kNumParams]{};
     std::atomic<float> mVuPeakL{0.0f}, mVuPeakR{0.0f};
+    // Slow per-param LFO modulation driven by Macro (written audio thread, read UI thread)
+    float mModPhase[kNumParams]{};
+    float mParamMod[kNumParams]{};
     void loadSample(int idx);
     void savePreset();
     void removeFromLibrary(int idx);

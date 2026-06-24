@@ -4,7 +4,20 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cmath>
 namespace fs = std::filesystem;
+
+// LFO frequency (Hz) per param — 0 = no modulation (enum/toggle/macro params)
+static constexpr float kLfoFreq[kNumParams] = {
+    // kReverbAmount, kReverbDecay, kDistAmount, kDistMode
+    0.19f, 0.23f, 0.17f, 0.0f,
+    // kDelaySyncMode, kDelayTimeMs, kDelayFeedback, kDelayMix
+    0.0f,  0.29f, 0.31f, 0.27f,
+    // kDelayLowcut, kDelayHighcut, kChorusAmount, kHpFreq
+    0.13f, 0.37f, 0.21f, 0.41f,
+    // kLpFreq, kOutputVol, kMacro
+    0.33f, 0.25f, 0.0f
+};
 
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
@@ -146,7 +159,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         addTitle(boxOutput, "OUTPUT");
 
         auto addKnob = [&](const IRECT& knobR, int param, const char* lbl, IColor fill) {
-            g->AttachControl(new ComanacheKnob(knobR, param, lbl, fill, false, &mMacroLink[param]));
+            g->AttachControl(new ComanacheKnob(knobR, param, lbl, fill, false, &mMacroLink[param], mParamMod));
             g->AttachControl(new MacroLinkButton(
                 IRECT(knobR.R-10, knobR.T, knobR.R, knobR.T+10), mMacroLink[param]));
         };
@@ -312,11 +325,27 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     }
 
     const float macro = (float)GetParam(kMacro)->GetNormalized();
+
+    // Update slow per-param LFO modulation (amplitude = macro * 0.08 normalized range)
+    static constexpr float kTwoPi = 6.28318530718f;
+    const float blockDur = (float)n / (float)GetSampleRate();
+    for (int i = 0; i < kNumParams; i++) {
+        if (kLfoFreq[i] <= 0.0f) { mParamMod[i] = 0.0f; continue; }
+        mModPhase[i] += kLfoFreq[i] * kTwoPi * blockDur;
+        if (mModPhase[i] > kTwoPi) mModPhase[i] -= kTwoPi;
+        mParamMod[i] = macro * 0.08f * std::sin(mModPhase[i]);
+    }
+
     auto applyMacro = [&](int idx) -> float {
         auto* p = GetParam(idx);
-        if (mMacroLink[idx] == 0) return (float)p->Value();
         float baseN = (float)p->GetNormalized();
-        float effN  = std::clamp(baseN + macro * (float)mMacroLink[idx], 0.0f, 1.0f);
+        float effN  = baseN;
+        // Macro link offset (only when linked)
+        if (mMacroLink[idx] != 0)
+            effN = std::clamp(effN + macro * (float)mMacroLink[idx], 0.0f, 1.0f);
+        // Slow LFO modulation (all continuous params, scales with macro)
+        if (kLfoFreq[idx] > 0.0f)
+            effN = std::clamp(effN + mParamMod[idx], 0.0f, 1.0f);
         return (float)p->FromNormalized(effN);
     };
 
@@ -336,6 +365,7 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     ep.lpFreq        = applyMacro(kLpFreq);
     float dBVol      = applyMacro(kOutputVol);  // dB, -60..+6
     ep.outputVol     = (dBVol <= -59.0f) ? 0.0f : std::pow(10.0f, dBVol / 20.0f);
+    ep.macroModAmount = macro;
     ep.bpm           = GetTempo() > 0.0 ? GetTempo() : 120.0;
 
     mFX.setParameters(ep);

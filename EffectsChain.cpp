@@ -91,6 +91,9 @@ void EffectsChain::prepare(double sampleRate, int)
 
     dlcL.reset(); dlcR.reset(); dhcL.reset(); dhcR.reset();
     hpL.reset();  hpR.reset();  lpL.reset();  lpR.reset();
+    bcLpL.reset(); bcLpR.reset();
+    bcHoldL=bcHoldR=bcCountL=bcCountR=0.0f;
+    vibratoPhase=0.0f;
     lastDlcFreq=lastDhcFreq=lastHpFreq=lastLpFreq=-1;
 }
 
@@ -176,18 +179,43 @@ void EffectsChain::process(float* outL, float* outR, int n)
         }
         if (params.delayHighcut != lastDhcFreq) {
             dhcL=dhcR=Biquad::makeLP(sr, params.delayHighcut); lastDhcFreq=params.delayHighcut;
+            bcLpL=bcLpR=Biquad::makeLP(sr, params.delayHighcut); // bitcrush output LP tracks same freq
         }
+
+        // Bitcrush: sample-rate reduction at 2x delayHighcut
+        const float bcSR   = std::max(4000.0f, 2.0f * params.delayHighcut);
+        const float bcHold = std::max(1.0f, (float)sr / bcSR);
+        // Pitch vibrato on delay return (macro-driven, ≈0.28Hz, max ±1.5ms)
+        const float vibDepth = params.macroModAmount * 0.0015f * (float)sr;
+        const float vibInc   = kTwoPiF * 0.28f / (float)sr;
 
         const float fb = std::clamp(params.delayFeedback, 0.0f, 0.97f);
         for (int i=0;i<n;i++) {
-            float wL = readBuf(delBufL, delPos, dtL);
-            float wR = readBuf(delBufR, delPos, dtR);
-            float fbL = dlcL.process(dhcL.process(wR * fb));
-            float fbR = dlcR.process(dhcR.process(wL * fb));
+            // Vibrato: slowly wobble read position
+            float vib = vibDepth * std::sin(vibratoPhase);
+            vibratoPhase += vibInc;
+            if (vibratoPhase > kTwoPiF) vibratoPhase -= kTwoPiF;
+
+            float wL = readBuf(delBufL, delPos, std::max(1.0f, dtL + vib));
+            float wR = readBuf(delBufR, delPos, std::max(1.0f, dtR + vib));
+
+            // Bitcrush: hold sample for bcHold samples (sample-rate reduction)
+            bcCountL += 1.0f;
+            if (bcCountL >= bcHold) { bcHoldL = wL; bcCountL = 0.0f; }
+            bcCountR += 1.0f;
+            if (bcCountR >= bcHold) { bcHoldR = wR; bcCountR = 0.0f; }
+
+            // Output: bitcrushed → LP filter cleans up aliasing
+            float outWL = bcLpL.process(bcHoldL);
+            float outWR = bcLpR.process(bcHoldR);
+
+            // Feedback: bitcrushed raw through existing LP(dhc) + HP(dlc)
+            float fbL = dlcL.process(dhcL.process(bcHoldR * fb));
+            float fbR = dlcR.process(dhcR.process(bcHoldL * fb));
             delBufL[delPos] = outL[i] + fbL;
             delBufR[delPos] = outR[i] + fbR;
-            outL[i] += wL * params.delayMix;
-            outR[i] += wR * params.delayMix;
+            outL[i] += outWL * params.delayMix;
+            outR[i] += outWR * params.delayMix;
             if (++delPos >= delSize) delPos = 0;
         }
     }
