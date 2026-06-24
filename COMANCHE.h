@@ -701,6 +701,7 @@ public:
     // Slow per-param LFO modulation driven by Macro (written audio thread, read UI thread)
     float mModPhase[kNumParams]{};
     float mParamMod[kNumParams]{};
+    float mSmoothMacro{0.0f};
     void loadSample(int idx);
     void savePreset();
     void removeFromLibrary(int idx);

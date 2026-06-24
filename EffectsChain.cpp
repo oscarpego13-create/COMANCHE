@@ -96,7 +96,7 @@ void EffectsChain::prepare(double sampleRate, int)
     vibratoPhase=0.0f;
     lastDlcFreq=lastDhcFreq=lastHpFreq=lastLpFreq=-1;
     mSmoothDistAmount=0.0f; mSmoothHpFreq=20.0f; mSmoothLpFreq=20000.0f;
-    mSmoothDlcFreq=20.0f; mSmoothDhcFreq=18000.0f;
+    mSmoothDlcFreq=20.0f; mSmoothDhcFreq=18000.0f; mSmoothMacroMod=0.0f;
 }
 
 void EffectsChain::setParameters(const EffectsParameters& p) { params = p; }
@@ -149,6 +149,7 @@ void EffectsChain::process(float* outL, float* outR, int n)
         mSmoothLpFreq     += alpha * (params.lpFreq        - mSmoothLpFreq);
         mSmoothDlcFreq    += alpha * (params.delayLowcut   - mSmoothDlcFreq);
         mSmoothDhcFreq    += alpha * (params.delayHighcut  - mSmoothDhcFreq);
+        mSmoothMacroMod   += alpha * (params.macroModAmount - mSmoothMacroMod);
     }
 
     // 1. Reverb
@@ -198,8 +199,8 @@ void EffectsChain::process(float* outL, float* outR, int n)
         // Bitcrush: sample-rate reduction at 2x delayHighcut
         const float bcSR   = std::max(4000.0f, 2.0f * mSmoothDhcFreq);
         const float bcHold = std::max(1.0f, (float)sr / bcSR);
-        // Pitch vibrato on delay return (macro-driven, ≈0.28Hz, max ±0.3ms — subtle)
-        const float vibDepth = params.macroModAmount * 0.0003f * (float)sr;
+        // Pitch vibrato on delay return (macro-driven, ≈0.28Hz — smoothed to prevent jumps)
+        const float vibDepth = mSmoothMacroMod * 0.0003f * (float)sr;
         const float vibInc   = kTwoPiF * 0.28f / (float)sr;
 
         const float fb = std::clamp(params.delayFeedback, 0.0f, 0.97f);

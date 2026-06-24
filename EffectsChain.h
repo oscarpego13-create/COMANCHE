@@ -127,6 +127,7 @@ private:
     float mSmoothLpFreq{20000.0f};
     float mSmoothDlcFreq{20.0f};
     float mSmoothDhcFreq{18000.0f};
+    float mSmoothMacroMod{0.0f};
 
     float delayTimeSamples() const;
     float readBuf(const std::vector<float>& b, int wp, float delay) const;

@@ -11,10 +11,10 @@ namespace fs = std::filesystem;
 static constexpr float kLfoFreq[kNumParams] = {
     // kReverbAmount, kReverbDecay, kDistAmount, kDistMode
     0.19f, 0.23f, 0.17f, 0.0f,
-    // kDelaySyncMode, kDelayTimeMs, kDelayFeedback(off), kDelayMix
-    0.0f,  0.29f, 0.0f,  0.27f,
-    // kDelayLowcut, kDelayHighcut, kChorusAmount, kHpFreq
-    0.13f, 0.37f, 0.21f, 0.41f,
+    // kDelaySyncMode, kDelayTimeMs(off-pitch), kDelayFeedback(off), kDelayMix
+    0.0f,  0.0f,  0.0f,  0.27f,
+    // kDelayLowcut, kDelayHighcut(off-bitcrush), kChorusAmount, kHpFreq
+    0.13f, 0.0f,  0.21f, 0.41f,
     // kLpFreq, kOutputVol(off), kMacro
     0.33f, 0.0f,  0.0f
 };
@@ -324,11 +324,17 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
         mVoiceTimer++;
     }
 
-    const float macro = (float)GetParam(kMacro)->GetNormalized();
-
-    // Update slow per-param LFO modulation (amplitude = macro * 0.08 normalized range)
+    const float macroRaw = (float)GetParam(kMacro)->GetNormalized();
+    // Smooth macro before applying to DSP — prevents zipper noise and pitch jumps
     static constexpr float kTwoPi = 6.28318530718f;
     const float blockDur = (float)n / (float)GetSampleRate();
+    {
+        const float a = 1.0f - std::exp(-blockDur / 0.050f); // 50ms tau
+        mSmoothMacro += a * (macroRaw - mSmoothMacro);
+    }
+    const float macro = mSmoothMacro;
+
+    // Update slow per-param LFO modulation (amplitude = macro * 0.07 normalized range)
     for (int i = 0; i < kNumParams; i++) {
         if (kLfoFreq[i] <= 0.0f) { mParamMod[i] = 0.0f; continue; }
         mModPhase[i] += kLfoFreq[i] * kTwoPi * blockDur;
