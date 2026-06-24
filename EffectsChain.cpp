@@ -185,8 +185,8 @@ void EffectsChain::process(float* outL, float* outR, int n)
         // Bitcrush: sample-rate reduction at 2x delayHighcut
         const float bcSR   = std::max(4000.0f, 2.0f * params.delayHighcut);
         const float bcHold = std::max(1.0f, (float)sr / bcSR);
-        // Pitch vibrato on delay return (macro-driven, ≈0.28Hz, max ±1.5ms)
-        const float vibDepth = params.macroModAmount * 0.0015f * (float)sr;
+        // Pitch vibrato on delay return (macro-driven, ≈0.28Hz, max ±0.3ms — subtle)
+        const float vibDepth = params.macroModAmount * 0.0003f * (float)sr;
         const float vibInc   = kTwoPiF * 0.28f / (float)sr;
 
         const float fb = std::clamp(params.delayFeedback, 0.0f, 0.97f);

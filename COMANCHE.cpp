@@ -7,16 +7,16 @@
 #include <cmath>
 namespace fs = std::filesystem;
 
-// LFO frequency (Hz) per param — 0 = no modulation (enum/toggle/macro params)
+// LFO frequency (Hz) per param — 0 = no modulation (enum/toggle/volume/feedback/macro)
 static constexpr float kLfoFreq[kNumParams] = {
     // kReverbAmount, kReverbDecay, kDistAmount, kDistMode
     0.19f, 0.23f, 0.17f, 0.0f,
-    // kDelaySyncMode, kDelayTimeMs, kDelayFeedback, kDelayMix
-    0.0f,  0.29f, 0.31f, 0.27f,
+    // kDelaySyncMode, kDelayTimeMs, kDelayFeedback(off), kDelayMix
+    0.0f,  0.29f, 0.0f,  0.27f,
     // kDelayLowcut, kDelayHighcut, kChorusAmount, kHpFreq
     0.13f, 0.37f, 0.21f, 0.41f,
-    // kLpFreq, kOutputVol, kMacro
-    0.33f, 0.25f, 0.0f
+    // kLpFreq, kOutputVol(off), kMacro
+    0.33f, 0.0f,  0.0f
 };
 
 // ─── Constructor ─────────────────────────────────────────────────────────────
@@ -33,10 +33,10 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kDelayFeedback)->InitDouble("DelayFb",     0.35,    0.0,   0.97,   0.001);
     GetParam(kDelayMix)     ->InitDouble("DelayMix",    0.0,     0.0,   1.0,    0.001);
     GetParam(kDelayLowcut)  ->InitDouble("DelayLo",     20.0,    20.0,  500.0,  1.0,  "Hz");
-    GetParam(kDelayHighcut) ->InitDouble("DelayHi",     18000.0, 2000.0,18000.0,1.0,  "Hz");
+    GetParam(kDelayHighcut) ->InitDouble("DelayHi",     18000.0, 1000.0,18000.0,1.0,  "Hz");
     GetParam(kChorusAmount) ->InitDouble("Chorus",      0.0,     0.0,   1.0,    0.001);
-    GetParam(kHpFreq)       ->InitDouble("HP",          20.0,    20.0,  2000.0, 1.0,  "Hz");
-    GetParam(kLpFreq)       ->InitDouble("LP",          20000.0, 500.0, 20000.0,1.0,  "Hz");
+    GetParam(kHpFreq)       ->InitDouble("HP",          20.0,    20.0,  400.0,  1.0,  "Hz");
+    GetParam(kLpFreq)       ->InitDouble("LP",          500.0,   20.0,  500.0,  1.0,  "Hz");
     GetParam(kOutputVol)    ->InitDouble("OutVol",      0.0,   -60.0,   6.0,    0.1, "dB");
     GetParam(kMacro)        ->InitDouble("Macro",       0.0,     0.0,   1.0,    0.001);
 
@@ -59,7 +59,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         const IRECT hdr(full.L, full.T, full.R, full.T + 32.0f);
         g->AttachControl(new ITextControl(
             IRECT(hdr.L+12, hdr.T, hdr.L+240, hdr.B),
-            "comanche v1.0",
+            "comanche v0.1",
             IText(12.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
 
         // ── Left panel (260px): folder button + save icon + sample list ───────
@@ -260,7 +260,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             const float bfsX=innerL+vsW+10.0f;
             g->AttachControl(new BandFilterSlider(
                 IRECT(bfsX, innerT, bfsX+bfsW, innerB),
-                kHpFreq, kLpFreq));
+                kHpFreq, kLpFreq, 20.0f, 500.0f));
             g->AttachControl(new ITextControl(
                 IRECT(bfsX-2, boxOutput.T+3, bfsX+bfsW+2, boxOutput.T+16),
                 "FILTER",
@@ -333,7 +333,10 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
         if (kLfoFreq[i] <= 0.0f) { mParamMod[i] = 0.0f; continue; }
         mModPhase[i] += kLfoFreq[i] * kTwoPi * blockDur;
         if (mModPhase[i] > kTwoPi) mModPhase[i] -= kTwoPi;
-        mParamMod[i] = macro * 0.08f * std::sin(mModPhase[i]);
+        // Sum of two incommensurate sinusoids → irregular, non-repeating shape
+        float v = std::sin(mModPhase[i])
+                + 0.5f * std::sin(mModPhase[i] * 2.7183f + (float)i * 1.618f);
+        mParamMod[i] = macro * 0.07f * (v / 1.5f);
     }
 
     auto applyMacro = [&](int idx) -> float {
