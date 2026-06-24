@@ -95,6 +95,8 @@ void EffectsChain::prepare(double sampleRate, int)
     bcHoldL=bcHoldR=bcCountL=bcCountR=0.0f;
     vibratoPhase=0.0f;
     lastDlcFreq=lastDhcFreq=lastHpFreq=lastLpFreq=-1;
+    mSmoothDistAmount=0.0f; mSmoothHpFreq=20.0f; mSmoothLpFreq=20000.0f;
+    mSmoothDlcFreq=20.0f; mSmoothDhcFreq=18000.0f;
 }
 
 void EffectsChain::setParameters(const EffectsParameters& p) { params = p; }
@@ -138,25 +140,36 @@ void EffectsChain::process(float* outL, float* outR, int n)
 {
     if (n == 0) return;
 
+    // Smooth params to prevent zipper noise / sampling artifacts on rapid changes (~30ms tau)
+    {
+        const float blockDur = (float)n / (float)sr;
+        const float alpha = 1.0f - std::exp(-blockDur / 0.030f);
+        mSmoothDistAmount += alpha * (params.distAmount    - mSmoothDistAmount);
+        mSmoothHpFreq     += alpha * (params.hpFreq        - mSmoothHpFreq);
+        mSmoothLpFreq     += alpha * (params.lpFreq        - mSmoothLpFreq);
+        mSmoothDlcFreq    += alpha * (params.delayLowcut   - mSmoothDlcFreq);
+        mSmoothDhcFreq    += alpha * (params.delayHighcut  - mSmoothDhcFreq);
+    }
+
     // 1. Reverb
     reverb.process(outL, outR, n, params.reverbAmount, params.reverbDecay);
 
     // 2. Distortion + gain compensation + tape HF rolloff
-    if (params.distAmount > 0.0f) {
-        const float comp = 1.0f / (1.0f + params.distAmount * 4.0f);
+    if (mSmoothDistAmount > 0.0001f) {
+        const float comp = 1.0f / (1.0f + mSmoothDistAmount * 4.0f);
         for (int i=0;i<n;i++) {
             float dL, dR;
             switch (params.distMode) {
-                case 1: dL=distTape(outL[i],params.distAmount); dR=distTape(outR[i],params.distAmount); break;
-                case 2: dL=distTube(outL[i],params.distAmount); dR=distTube(outR[i],params.distAmount); break;
-                default:dL=distClip(outL[i],params.distAmount); dR=distClip(outR[i],params.distAmount); break;
+                case 1: dL=distTape(outL[i],mSmoothDistAmount); dR=distTape(outR[i],mSmoothDistAmount); break;
+                case 2: dL=distTube(outL[i],mSmoothDistAmount); dR=distTube(outR[i],mSmoothDistAmount); break;
+                default:dL=distClip(outL[i],mSmoothDistAmount); dR=distClip(outR[i],mSmoothDistAmount); break;
             }
             outL[i] = dL * comp;
             outR[i] = dR * comp;
         }
         // TAPE: progressive HF loss (cutoff falls from 20kHz→3kHz as dist increases)
         if (params.distMode == 1) {
-            float fc = 20000.0f * std::pow(0.15f, params.distAmount);
+            float fc = 20000.0f * std::pow(0.15f, mSmoothDistAmount);
             fc = std::max(fc, 3000.0f);
             if (std::abs(fc - lastTapeHfFreq) > 20.0f) {
                 tapeHfL = tapeHfR = Biquad::makeLP(sr, fc);
@@ -174,16 +187,16 @@ void EffectsChain::process(float* outL, float* outR, int n)
         const float dtL = delayTimeSamples();
         const float dtR = dtL + kPingPongMs * 0.001f * (float)sr;
 
-        if (params.delayLowcut != lastDlcFreq) {
-            dlcL=dlcR=Biquad::makeHP(sr, params.delayLowcut); lastDlcFreq=params.delayLowcut;
+        if (std::abs(mSmoothDlcFreq - lastDlcFreq) > 0.5f) {
+            dlcL=dlcR=Biquad::makeHP(sr, mSmoothDlcFreq); lastDlcFreq=mSmoothDlcFreq;
         }
-        if (params.delayHighcut != lastDhcFreq) {
-            dhcL=dhcR=Biquad::makeLP(sr, params.delayHighcut); lastDhcFreq=params.delayHighcut;
-            bcLpL=bcLpR=Biquad::makeLP(sr, params.delayHighcut); // bitcrush output LP tracks same freq
+        if (std::abs(mSmoothDhcFreq - lastDhcFreq) > 0.5f) {
+            dhcL=dhcR=Biquad::makeLP(sr, mSmoothDhcFreq); lastDhcFreq=mSmoothDhcFreq;
+            bcLpL=bcLpR=Biquad::makeLP(sr, mSmoothDhcFreq);
         }
 
         // Bitcrush: sample-rate reduction at 2x delayHighcut
-        const float bcSR   = std::max(4000.0f, 2.0f * params.delayHighcut);
+        const float bcSR   = std::max(4000.0f, 2.0f * mSmoothDhcFreq);
         const float bcHold = std::max(1.0f, (float)sr / bcSR);
         // Pitch vibrato on delay return (macro-driven, ≈0.28Hz, max ±0.3ms — subtle)
         const float vibDepth = params.macroModAmount * 0.0003f * (float)sr;
@@ -239,9 +252,9 @@ void EffectsChain::process(float* outL, float* outR, int n)
         }
     }
 
-    // 5. Output HP + LP filters
-    if (params.hpFreq != lastHpFreq) { hpL=hpR=Biquad::makeHP(sr, params.hpFreq); lastHpFreq=params.hpFreq; }
-    if (params.lpFreq != lastLpFreq) { lpL=lpR=Biquad::makeLP(sr, params.lpFreq); lastLpFreq=params.lpFreq; }
+    // 5. Output HP + LP filters (use smoothed values)
+    if (std::abs(mSmoothHpFreq - lastHpFreq) > 0.5f) { hpL=hpR=Biquad::makeHP(sr, mSmoothHpFreq); lastHpFreq=mSmoothHpFreq; }
+    if (std::abs(mSmoothLpFreq - lastLpFreq) > 0.5f) { lpL=lpR=Biquad::makeLP(sr, mSmoothLpFreq); lastLpFreq=mSmoothLpFreq; }
     const float vol = params.outputVol;
     for (int i=0;i<n;i++) {
         outL[i] = lpL.process(hpL.process(outL[i])) * vol;

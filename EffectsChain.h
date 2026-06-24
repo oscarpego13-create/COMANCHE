@@ -121,6 +121,13 @@ private:
     Biquad hpL, hpR, lpL, lpR;
     float lastHpFreq{-1}, lastLpFreq{-1};
 
+    // Parameter smoothers — prevent zipper noise on rapid knob changes
+    float mSmoothDistAmount{0.0f};
+    float mSmoothHpFreq{20.0f};
+    float mSmoothLpFreq{20000.0f};
+    float mSmoothDlcFreq{20.0f};
+    float mSmoothDhcFreq{18000.0f};
+
     float delayTimeSamples() const;
     float readBuf(const std::vector<float>& b, int wp, float delay) const;
 

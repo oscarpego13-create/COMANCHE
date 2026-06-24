@@ -36,7 +36,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kDelayHighcut) ->InitDouble("DelayHi",     18000.0, 1000.0,18000.0,1.0,  "Hz");
     GetParam(kChorusAmount) ->InitDouble("Chorus",      0.0,     0.0,   1.0,    0.001);
     GetParam(kHpFreq)       ->InitDouble("HP",          20.0,    20.0,  400.0,  1.0,  "Hz");
-    GetParam(kLpFreq)       ->InitDouble("LP",          500.0,   20.0,  500.0,  1.0,  "Hz");
+    GetParam(kLpFreq)       ->InitDouble("LP",          20000.0, 500.0, 20000.0,1.0,  "Hz");
     GetParam(kOutputVol)    ->InitDouble("OutVol",      0.0,   -60.0,   6.0,    0.1, "dB");
     GetParam(kMacro)        ->InitDouble("Macro",       0.0,     0.0,   1.0,    0.001);
 
@@ -260,7 +260,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             const float bfsX=innerL+vsW+10.0f;
             g->AttachControl(new BandFilterSlider(
                 IRECT(bfsX, innerT, bfsX+bfsW, innerB),
-                kHpFreq, kLpFreq, 20.0f, 500.0f));
+                kHpFreq, kLpFreq, 20.0f, 20000.0f));
             g->AttachControl(new ITextControl(
                 IRECT(bfsX-2, boxOutput.T+3, bfsX+bfsW+2, boxOutput.T+16),
                 "FILTER",
