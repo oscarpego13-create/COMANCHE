@@ -13,10 +13,10 @@ static constexpr float kLfoFreq[kNumParams] = {
     0.19f, 0.23f, 0.17f, 0.0f,
     // kDelaySyncMode, kDelayTimeMs(off-pitch), kDelayFeedback(off), kDelayMix
     0.0f,  0.0f,  0.0f,  0.27f,
-    // kDelayLowcut, kDelayHighcut(off-bitcrush), kChorusAmount, kHpFreq
-    0.13f, 0.0f,  0.21f, 0.41f,
-    // kLpFreq, kOutputVol(off), kMacro
-    0.33f, 0.0f,  0.0f
+    // kDelayLowcut, kDelayHighcut(off), kChorusAmount, kHpFreq(off-filter)
+    0.13f, 0.0f,  0.21f, 0.0f,
+    // kLpFreq(off-filter), kOutputVol(off), kMacro
+    0.0f,  0.0f,  0.0f
 };
 
 // ─── Constructor ─────────────────────────────────────────────────────────────

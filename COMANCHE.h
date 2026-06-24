@@ -131,15 +131,17 @@ public:
                    kCy-(float)(std::cos(angle)*reach), nullptr, 2.2f);
 
         static const IColor kArc(220,80,140,255);
-        // Macro link arc (when linked with green/orange dot)
+        const float arcR = kR + 1.8f;
+
+        // Macro link arc + track where it ends (LFO arc chains from here)
+        double macroEndNorm = baseNorm;
         if (!mIsMacro && mLinkState && *mLinkState != 0) {
             float macro = (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
             if (macro > 0.001f) {
-                double effNorm = std::clamp(baseNorm + macro*(double)(*mLinkState), 0.0, 1.0);
-                double startA  = (-135.0 + baseNorm*270.0)*(M_PI/180.0);
-                double endA    = (-135.0 + effNorm *270.0)*(M_PI/180.0);
+                macroEndNorm = std::clamp(baseNorm + macro*(double)(*mLinkState), 0.0, 1.0);
+                double startA = (-135.0 + baseNorm    *270.0)*(M_PI/180.0);
+                double endA   = (-135.0 + macroEndNorm*270.0)*(M_PI/180.0);
                 if (std::abs(endA-startA) > 0.01) {
-                    float arcR = kR + 1.8f;
                     for (int s=1; s<=24; s++) {
                         double a0 = startA+(endA-startA)*(s-1.0)/24.0;
                         double a1 = startA+(endA-startA)*(double)s/24.0;
@@ -151,15 +153,14 @@ public:
                 }
             }
         }
-        // LFO arc (random modulation from Macro — always visible when macro > 0)
+        // LFO arc — chains from end of macro arc (or from needle if no link)
         if (!mIsMacro && mModArray) {
             float lfoMod = mModArray[GetParamIdx()];
             if (std::abs(lfoMod) > 0.005f) {
-                double effNorm = std::clamp(baseNorm + (double)lfoMod, 0.0, 1.0);
-                double startA  = (-135.0 + baseNorm*270.0)*(M_PI/180.0);
-                double endA    = (-135.0 + effNorm *270.0)*(M_PI/180.0);
+                double effNorm = std::clamp(macroEndNorm + (double)lfoMod, 0.0, 1.0);
+                double startA  = (-135.0 + macroEndNorm*270.0)*(M_PI/180.0);
+                double endA    = (-135.0 + effNorm     *270.0)*(M_PI/180.0);
                 if (std::abs(endA-startA) > 0.01) {
-                    float arcR = kR + 1.8f;
                     for (int s=1; s<=24; s++) {
                         double a0 = startA+(endA-startA)*(s-1.0)/24.0;
                         double a1 = startA+(endA-startA)*(double)s/24.0;
