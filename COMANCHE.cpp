@@ -59,7 +59,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         const IRECT hdr(full.L, full.T, full.R, full.T + 32.0f);
         g->AttachControl(new ITextControl(
             IRECT(hdr.L+12, hdr.T, hdr.L+240, hdr.B),
-            "comanche v0.1",
+            "comanche v0.1.1",
             IText(12.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
 
         // ── Left panel (260px): folder button + save icon + sample list ───────
