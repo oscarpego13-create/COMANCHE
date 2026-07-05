@@ -441,20 +441,65 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
+// Format v2: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [params]
+// Format v1 (old, broken): [folder(str)] [params]  — sample was never saved
+static constexpr int kSerializeMagic = 0x434F4D32; // 'COM2'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
-    WDL_String fs(mFolderPath.c_str());
-    chunk.PutStr(fs.Get());
+    chunk.Put(&kSerializeMagic);
+    WDL_String folder(mFolderPath.c_str());
+    chunk.PutStr(folder.Get());
+    std::string samplePath = (mSelectedIdx >= 0) ? mLibrary.getSamplePath(mSelectedIdx) : "";
+    WDL_String sp(samplePath.c_str());
+    chunk.PutStr(sp.Get());
+    for (int i = 0; i < kNumParams; i++) chunk.Put(&mMacroLink[i]);
     return SerializeParams(chunk);
 }
 
 int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
 {
-    WDL_String fs;
-    pos = chunk.GetStr(fs, pos);
-    mFolderPath = fs.Get();
-    if (!mFolderPath.empty()) mLibrary.setFolder(mFolderPath);
+    int magic = 0;
+    int afterMagic = chunk.Get(&magic, pos);
+
+    if (afterMagic > pos && magic == kSerializeMagic) {
+        // v2: full restore
+        pos = afterMagic;
+        WDL_String folder;
+        pos = chunk.GetStr(folder, pos);
+        mFolderPath = folder.Get();
+        if (!mFolderPath.empty()) mLibrary.setFolder(mFolderPath);
+
+        WDL_String sp;
+        pos = chunk.GetStr(sp, pos);
+        const std::string samplePath = sp.Get();
+
+        if (!samplePath.empty()) {
+            std::vector<float> left, right;
+            int numCh; double fileSr;
+            if (mLibrary.loadSample(samplePath, left, right, numCh, fileSr)) {
+                mSampleL   = std::move(left);
+                mSampleR   = std::move(right);
+                mSampleLen = (int)mSampleL.size();
+                mSampleSR  = fileSr;
+                mSelectedIdx = -1;
+                const auto& paths = mLibrary.getSamplePaths();
+                for (int i = 0; i < (int)paths.size(); i++) {
+                    if (paths[i] == samplePath) { mSelectedIdx = i; break; }
+                }
+                for (auto& v : mVoices) v.active = false;
+            }
+        }
+
+        for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
+    } else {
+        // v1 (old saves): folder + params only, no sample
+        WDL_String folder;
+        pos = chunk.GetStr(folder, pos);
+        mFolderPath = folder.Get();
+        if (!mFolderPath.empty()) mLibrary.setFolder(mFolderPath);
+    }
+
     return UnserializeParams(chunk, pos);
 }
 

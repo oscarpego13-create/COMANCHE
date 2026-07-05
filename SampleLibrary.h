@@ -11,6 +11,7 @@ public:
     std::string getFolder() const { return currentFolder; }
 
     const std::vector<std::string>& getSampleNames() const { return sampleNames; }
+    const std::vector<std::string>& getSamplePaths() const { return samplePaths; }
     std::string getSamplePath(int index) const;
 
     bool loadSample(const std::string& path,
