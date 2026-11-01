@@ -34,3 +34,14 @@ target_link_libraries(${PROJECT_NAME}-vst3 PRIVATE
   "-framework AudioToolbox"
   "-framework CoreFoundation"
 )
+
+# iPlug2's CMake builds the NanoVG/Metal renderer as a shared object library without the
+# Objective-C class prefix, so its classes (MNVGcontext, MNVGbuffers, MNVGtexture) keep their
+# bare names and clash with any other iPlug2 plugin in the same host (e.g. NoisePanner),
+# which can crash the host when the editor opens. Give them COMANCHE's prefix too.
+foreach(nvg_obj iPlug2_IGraphics_NanoVG_GL_obj iPlug2_IGraphics_NanoVG_Metal_obj)
+  if(TARGET ${nvg_obj})
+    target_compile_definitions(${nvg_obj} PRIVATE OBJC_PREFIX=v${PROJECT_NAME} VST3_API)
+    target_compile_options(${nvg_obj} PRIVATE "SHELL:-include ${IPLUG2_DIR}/IPlug/IPlugOBJCPrefix.pch")
+  endif()
+endforeach()

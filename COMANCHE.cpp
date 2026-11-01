@@ -43,6 +43,11 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     loadPersistentState();
 
 #if IPLUG_EDITOR
+    // Report the scaled window size from the start (same int maths as IGraphics::WindowWidth()).
+    // Otherwise opening the editor asks the host to resize the view from inside attached(),
+    // which crashes FL Studio.
+    SetEditorSize(static_cast<int>(static_cast<float>(PLUG_WIDTH) * UI_SCALE),
+                  static_cast<int>(static_cast<float>(PLUG_HEIGHT) * UI_SCALE));
     mMakeGraphicsFunc = [&]() {
         return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS,
                             GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT) * UI_SCALE);
