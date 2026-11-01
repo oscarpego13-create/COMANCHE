@@ -148,9 +148,9 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         const IRECT horse(hx, band.B - 2.0f - HORSE_FRAME_H, hx + HORSE_FRAME_W, band.B - 2.0f);
         g->AttachControl(new HorseScene(band, horse, g->LoadBitmap(HORSE_FN)));
 
-        // COMANCHERIA logo centred over the horse (artwork from the pack cover)
+        // COMANCHE logo centred over the horse (artwork from the pack cover)
         {
-            const float lw = 340.0f, lh = lw * 21.0f / 340.0f;
+            const float lw = 268.0f, lh = 21.0f;
             const float lx = std::clamp(horse.MW() - lw*0.5f, band.L + 4.0f, band.R - 4.0f - lw), ly = band.T - 26.0f;
             g->AttachControl(new LogoControl(IRECT(lx, ly, lx+lw, ly+lh), g->LoadBitmap(TITLE_FN)));
         }

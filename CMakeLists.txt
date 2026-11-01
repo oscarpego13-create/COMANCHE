@@ -26,8 +26,8 @@ iplug_add_plugin(${PROJECT_NAME}
     resources/fonts/Roboto-Mono-Regular.ttf
     resources/img/horse.png
     resources/img/horse@2x.png
-    resources/img/comancheria-title.png
-    resources/img/comancheria-title@2x.png
+    resources/img/comanche-title.png
+    resources/img/comanche-title@2x.png
 )
 
 target_link_libraries(${PROJECT_NAME}-vst3 PRIVATE

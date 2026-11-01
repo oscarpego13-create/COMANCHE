@@ -62,4 +62,4 @@
 #define HORSE_FN "horse.png"
 #define HORSE_FRAME_W 202.0f
 #define HORSE_FRAME_H 135.0f
-#define TITLE_FN "comancheria-title.png"
+#define TITLE_FN "comanche-title.png"
