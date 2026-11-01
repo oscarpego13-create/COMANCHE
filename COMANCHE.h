@@ -13,6 +13,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "EffectsChain.h"
 #include "SampleLibrary.h"
@@ -47,7 +48,8 @@ enum EMsgTags { kMsgLoadSample = 0 };
 namespace CT {
     static const IColor bgPrimary   {255,237,234,228};
     static const IColor bgPanel     {255,226,222,215};
-    static const IColor fgPrimary   {255, 26, 26, 26};
+    static const IColor fgPrimary   {255, 56, 56, 56};   // needles / lines
+    static const IColor textInk     {255, 58, 57, 54};   // all text
     static const IColor knobGrey    {255,155,155,142};
     static const IColor knobBlue    {255,139,163,184};
     static const IColor knobGold    {255,184,168,130};
@@ -64,14 +66,38 @@ namespace CT {
     static const IColor macroOff    {255,150,148,144};
     static const IColor macroPos    {255, 80,200,100};
     static const IColor macroNeg    {255,230,140, 50};
+    // Horse scene
+    static const IColor horseGlow   {255,255,128, 30};
+    static const IColor horseWind   {255, 60, 54, 48};
+    static const IColor horseInk    {255, 22, 20, 18};
+}
+
+// Layout metrics from the UI Lab design
+namespace UI {
+    static constexpr float kValueSize = 8.5f;   // knob value text
+    static constexpr float kLabelSize = 9.5f;   // knob label text
+    static constexpr float kLabelGap  = 24.0f;  // label distance below the knob circle
+    static constexpr float kRowH      = 19.0f;  // sample list row height
+}
+
+// 0..1 params without a unit read as a percentage ("42%")
+inline void KnobValueText(const IParam* p, WDL_String& out)
+{
+    const char* u = p->GetLabel();
+    if (p->GetMin() == 0.0 && p->GetMax() <= 1.0 && (!u || !u[0])) {
+        out.SetFormatted(16, "%d%%", (int)std::lround(p->Value() * 100.0));
+        return;
+    }
+    p->GetDisplay(out, false);
+    if (u && u[0]) out.Append(u);
 }
 
 // ─── Small macro link button ──────────────────────────────────────────────────
 class MacroLinkButton final : public IControl
 {
 public:
-    MacroLinkButton(const IRECT& b, int& state)
-        : IControl(b, kNoParameter), mState(state) {}
+    MacroLinkButton(const IRECT& b, int& state, std::function<void()> onChange={})
+        : IControl(b, kNoParameter), mState(state), mOnChange(std::move(onChange)) {}
 
     void Draw(IGraphics& g) override {
         IColor c = (mState== 1) ? CT::macroPos
@@ -85,10 +111,12 @@ public:
         if (mState == 0)      mState =  1;
         else if (mState == 1) mState = -1;
         else                  mState =  0;
+        if (mOnChange) mOnChange();
         if (GetUI()) GetUI()->SetAllControlsDirty();
     }
 private:
     int& mState;
+    std::function<void()> mOnChange;
 };
 
 // ─── Flat knob with macro arc + continuous macro redraw ───────────────────────
@@ -173,13 +201,14 @@ public:
             }
         }
 
-        WDL_String vs; GetParam()->GetDisplay(vs,false);
-        const char* u = GetParam()->GetLabel();
-        if (u && u[0]) vs.Append(u);
-        IText vt(mIsMacro?13.0f:11.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        WDL_String vs; KnobValueText(GetParam(), vs);
+        IText vt(mIsMacro?13.0f:UI::kValueSize, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(vt, vs.Get(), IRECT(mRECT.L, kCy+kR+2, mRECT.R, kCy+kR+17));
-        IText lt(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
-        g.DrawText(lt, mLabel, IRECT(mRECT.L, kCy+kR+17, mRECT.R, kCy+kR+31));
+        if (mLabel && mLabel[0]) {
+            const float lg = mIsMacro ? 17.0f : UI::kLabelGap;
+            IText lt(UI::kLabelSize, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
+            g.DrawText(lt, mLabel, IRECT(mRECT.L, kCy+kR+lg, mRECT.R, kCy+kR+lg+14));
+        }
     }
 
     void OnAttached() override { if (GetParam()) SetValue(GetParam()->GetNormalized()); }
@@ -211,7 +240,7 @@ public:
     void Draw(IGraphics& g) override {
         bool active = ((int)(GetParam()->Value()+0.5)==mMode);
         g.FillRoundRect(active?CT::btnActive:CT::btnInactive, mRECT, 2.0f);
-        IText t(9.0f, active?CT::textLight:CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        IText t(9.0f, active?CT::textLight:CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(t, mLabel, mRECT);
     }
     void OnMouseDown(float, float, const IMouseMod&) override {
@@ -230,7 +259,7 @@ public:
     void Draw(IGraphics& g) override {
         bool on = (GetParam() && GetParam()->Value() > 0.5);
         g.FillRoundRect(on ? CT::btnActive : IColor(255,170,165,158), mRECT, 3.0f);
-        IText t(9.0f, on ? CT::textLight : CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        IText t(9.0f, on ? CT::textLight : CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(t, "TEMPO", mRECT);
     }
     void OnMouseDown(float,float,const IMouseMod&) override {
@@ -279,10 +308,8 @@ public:
         } else {
             snprintf(valBuf, sizeof(valBuf), "%s", kSubLabels[stepFromMs((float)GetParam()->Value())]);
         }
-        IText vt(11.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        IText vt(UI::kValueSize, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(vt, valBuf, IRECT(mRECT.L, kCy+kR+2, mRECT.R, kCy+kR+17));
-        IText lt(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle);
-        g.DrawText(lt, "TIME", IRECT(mRECT.L, kCy+kR+17, mRECT.R, kCy+kR+31));
     }
 
     void OnAttached() override { if(GetParam()) SetValue(GetParam()->GetNormalized()); }
@@ -338,7 +365,7 @@ public:
           mDropFn(std::move(dropFn)), mRemoveFn(std::move(removeFn)), mResetPresetFn(std::move(resetFn)) {}
 
     void Draw(IGraphics& g) override {
-        const float sbW=12.0f, rowH=22.0f;
+        const float sbW=12.0f, rowH=UI::kRowH;
         IRECT listR(mRECT.L, mRECT.T, mRECT.R-sbW-1, mRECT.B);
         IRECT sbR  (mRECT.R-sbW, mRECT.T, mRECT.R, mRECT.B);
         g.FillRect(CT::bgPanel, listR);
@@ -348,7 +375,7 @@ public:
             IRECT row(listR.L, listR.T+(i-mScroll)*rowH, listR.R, listR.T+(i-mScroll+1)*rowH);
             bool sel=(i==mSelected);
             if (sel) g.FillRect(CT::fgPrimary, row);
-            IText t(11.0f, sel?CT::textLight:CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle);
+            IText t(11.0f, sel?CT::textLight:CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
             g.DrawText(t, mNames[i].c_str(), IRECT(row.L+6,row.T,row.R,row.B));
         }
         g.FillRoundRect(IColor(255,120,118,114), sbR, 6.0f);
@@ -361,7 +388,7 @@ public:
         }
     }
     void OnMouseDown(float x, float y, const IMouseMod& mod) override {
-        const float sbW=12.0f, rowH=22.0f;
+        const float sbW=12.0f, rowH=UI::kRowH;
         int row=mScroll+(int)((y-mRECT.T)/rowH);
         if (mod.R) {
             if (row>=0&&row<total()) {
@@ -389,7 +416,7 @@ public:
     }
     void OnMouseUp(float,float,const IMouseMod&) override {mSbDrag=false;}
     void OnMouseDrag(float,float y,float,float dy,const IMouseMod&) override {
-        const float rowH=22.0f;
+        const float rowH=UI::kRowH;
         int maxRows=(int)(mRECT.H()/rowH), maxSc=std::max(0,total()-maxRows);
         if (mSbDrag){
             float thumbH=std::max(20.0f,mRECT.H()*(float)maxRows/std::max(1,total()));
@@ -399,7 +426,7 @@ public:
         SetDirty(false);
     }
     void OnMouseWheel(float,float,const IMouseMod&,float d) override {
-        const float rowH=22.0f;
+        const float rowH=UI::kRowH;
         int maxRows=(int)(mRECT.H()/rowH),maxSc=std::max(0,total()-maxRows);
         mScroll=std::clamp(mScroll-(int)d,0,maxSc); SetDirty(false);
     }
@@ -514,19 +541,31 @@ public:
         float hiY=hzToY((float)GetDelegate()->GetParam(mHiP)->Value(),tT,tH);
         mDragLo = (std::abs(y-loY) < std::abs(y-hiY));
         mDragY=y;
+        mDragging=true;
+        GetDelegate()->BeginInformHostOfParamChangeFromUI(mDragLo?mLoP:mHiP);
+    }
+    void OnMouseUp(float,float,const IMouseMod&) override {
+        if (!mDragging) return;
+        mDragging=false;
+        GetDelegate()->EndInformHostOfParamChangeFromUI(mDragLo?mLoP:mHiP);
     }
     void OnMouseDrag(float,float y,float,float,const IMouseMod&) override {
         const float lblH=13.0f,pad=2.0f;
         const float tT=mRECT.T+lblH+pad,tB=mRECT.B-lblH-pad,tH=tB-tT;
         float hz=yToHz(y,tT,tH);
-        auto* p=GetDelegate()->GetParam(mDragLo?mLoP:mHiP);
-        p->SetNormalized(std::clamp((float)p->ToNormalized(hz),0.0f,1.0f));
-        SetDirty(true);
+        const int pi=mDragLo?mLoP:mHiP;
+        auto* p=GetDelegate()->GetParam(pi);
+        // Go through the delegate so the host sees the change and saves it
+        GetDelegate()->SendParameterValueFromUI(pi, std::clamp(p->ToNormalized(hz),0.0,1.0));
+        SetDirty(false);
     }
     void OnMouseDblClick(float,float,const IMouseMod&) override {
-        GetDelegate()->GetParam(mLoP)->SetToDefault();
-        GetDelegate()->GetParam(mHiP)->SetToDefault();
-        SetDirty(true);
+        for (int pi : {mLoP, mHiP}) {
+            GetDelegate()->BeginInformHostOfParamChangeFromUI(pi);
+            GetDelegate()->SendParameterValueFromUI(pi, GetDelegate()->GetParam(pi)->GetDefault(true));
+            GetDelegate()->EndInformHostOfParamChangeFromUI(pi);
+        }
+        SetDirty(false);
     }
 
 private:
@@ -539,7 +578,7 @@ private:
         float n=std::clamp(1.0f-(y-tT)/tH,0.0f,1.0f);
         return std::pow(10.0f, mLogMin+n*(mLogMax-mLogMin));
     }
-    int mLoP,mHiP; bool mDragLo{false}; float mDragY{0};
+    int mLoP,mHiP; bool mDragLo{false}, mDragging{false}; float mDragY{0};
     float mLogMin, mLogMax;
 };
 
@@ -555,7 +594,7 @@ public:
         WDL_String vs; GetParam()->GetDisplay(vs,false);
         const char* u=GetParam()->GetLabel();
         if (u&&u[0]) vs.Append(u);
-        IText t(10.0f,CT::fgPrimary,"RobotoMono",EAlign::Center,EVAlign::Middle);
+        IText t(10.0f,CT::textInk,"RobotoMono",EAlign::Center,EVAlign::Middle);
         g.DrawText(t, vs.Get(), IRECT(mRECT.L,mRECT.T,mRECT.R,mRECT.B));
         // drag arrows
         float ax=mRECT.R-6.0f, ay=mRECT.MH();
@@ -670,12 +709,168 @@ public:
         : IControl(b, kNoParameter), mLabel(lbl), mFn(std::move(fn)) {}
     void Draw(IGraphics& g) override {
         g.FillRoundRect(CT::btnInactive, mRECT, 2.0f);
-        IText t(10.0f,CT::fgPrimary,"RobotoMono",EAlign::Center,EVAlign::Middle);
+        IText t(10.0f,CT::textInk,"RobotoMono",EAlign::Center,EVAlign::Middle);
+        g.PathClipRegion(mRECT);   // narrow panel: keep the label inside the button
         g.DrawText(t, mLabel, mRECT);
+        g.PathClipRegion();
     }
     void OnMouseDown(float,float,const IMouseMod&) override {if(mFn)mFn(GetUI());}
 private:
     const char* mLabel; OnClickFn mFn;
+};
+
+// ─── DIST mode: one button under the knob, each click moves to the next mode ──
+class CycleModeButton final : public IControl
+{
+public:
+    CycleModeButton(const IRECT& b, int param, const char* m0, const char* m1, const char* m2)
+        : IControl(b, param), mNames{m0, m1, m2} {}
+    void Draw(IGraphics& g) override {
+        const int m = std::clamp((int)(GetParam()->Value() + 0.5), 0, 2);
+        g.FillRoundRect(CT::btnInactive, mRECT, 3.0f);
+        IText t(9.0f, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
+        g.DrawText(t, mNames[m], mRECT);
+    }
+    void OnMouseDown(float, float, const IMouseMod&) override {
+        const int next = ((int)(GetParam()->Value() + 0.5) + 1) % 3;
+        SetValue(GetParam()->ToNormalized((double)next)); SetDirty(true);
+    }
+private:
+    const char* mNames[3];
+};
+
+// ─── Reset preset: black X, same size and style as the save icon ─────────────
+class ResetIconButton final : public IControl
+{
+public:
+    ResetIconButton(const IRECT& b, std::function<void()> fn)
+        : IControl(b, kNoParameter), mFn(std::move(fn)) {}
+    void Draw(IGraphics& g) override {
+        g.FillRoundRect(CT::btnInactive, mRECT, 3.0f);
+        const float in = 8.0f;
+        g.DrawLine(CT::fgPrimary, mRECT.L+in, mRECT.T+in, mRECT.R-in, mRECT.B-in, nullptr, 2.0f);
+        g.DrawLine(CT::fgPrimary, mRECT.R-in, mRECT.T+in, mRECT.L+in, mRECT.B-in, nullptr, 2.0f);
+    }
+    void OnMouseDown(float, float, const IMouseMod&) override { if (mFn) mFn(); }
+private:
+    std::function<void()> mFn;
+};
+
+// ─── Static image (COMANCHERIA logo) ─────────────────────────────────────────
+class LogoControl final : public IControl
+{
+public:
+    LogoControl(const IRECT& b, const IBitmap& bmp) : IControl(b, kNoParameter), mBitmap(bmp) { SetIgnoreMouse(true); }
+    void Draw(IGraphics& g) override { if (mBitmap.IsValid()) g.DrawFittedBitmap(mBitmap, mRECT); }
+private:
+    IBitmap mBitmap;
+};
+
+// ─── Horse scene: open band behind the MACRO with a horse whose gait follows it ─
+// The horse is a pre-rendered sprite sheet (12 frames x 3 gaits: walk, trot, gallop,
+// baked by the UI Lab at its exact on-screen size). Per frame this only picks a cell
+// and draws a handful of lines, so the cost is one bitmap blit.
+class HorseScene final : public IControl
+{
+public:
+    HorseScene(const IRECT& band, const IRECT& horse, const IBitmap& sheet)
+        : IControl(band, kNoParameter), mHorse(horse), mSheet(sheet)
+    { SetIgnoreMouse(true); mLast = std::chrono::steady_clock::now(); }
+
+    bool IsDirty() override { return true; }   // always animating: the horse walks even at MACRO 0
+
+    void Draw(IGraphics& g) override {
+        step();
+        const float L = mRECT.L, T = mRECT.T, R = mRECT.R, B = mRECT.B, w = mRECT.W(), h = mRECT.H();
+        const float k = mHorse.W() / kFW, gy = mHorse.T + kGround * k;
+        const float edge = std::min(70.0f, w * 0.18f);
+        auto fade = [&](float x) { float f = std::clamp(std::min(x - L, R - x) / edge, 0.0f, 1.0f); return f*f*(3.0f - 2.0f*f); };
+        auto withA = [](IColor c, float a) { c.A = (int)std::clamp(a * 255.0f, 0.0f, 255.0f); return c; };
+        auto wrap = [](float v, float m) { return v - m * std::floor(v / m); };
+        g.PathClipRegion(mRECT);
+
+        // Halo: wide soft ellipse behind the horse, fades in with the MACRO
+        if (mSmooth > 0.01f) {
+            const float m = mSmooth, cx = mHorse.L + mHorse.W() * 0.55f, cy = (T + B) * 0.5f, ry = h * 0.5f;
+            const float rx = std::min(std::max(mHorse.W() * 1.1f, h), std::min(cx - L, R - cx) + mHorse.W() * 0.4f);
+            const IColor c = CT::horseGlow;
+            g.PathTransformSave();
+            g.PathTransformTranslate(cx, cy);
+            g.PathTransformScale(rx / ry, 1.0f);
+            g.PathCircle(0, 0, ry);
+            g.PathFill(IPattern::CreateRadialGradient(0, 0, ry, {
+                {withA(c, 0.70f*m), 0.0f}, {withA(c, 0.48f*m), 0.3f}, {withA(c, 0.22f*m), 0.55f},
+                {withA(c, 0.06f*m), 0.8f}, {withA(c, 0.0f), 1.0f} }));
+            g.PathTransformRestore();
+        }
+        // Ground line, faded towards both ends
+        for (float x = L; x < R; x += 6.0f) {
+            const float a = fade(x + 3.0f);
+            if (a > 0.01f) g.DrawLine(withA(CT::horseInk, 0.85f*a), x, gy + 0.5f, x + 6.5f, gy + 0.5f + std::sin(x * 0.07f) * 0.4f, nullptr, 1.4f);
+        }
+        // Ground marks: move against the horse, locked to the frames (parallax rows)
+        const float sc = mScroll * k;
+        const int nMarks = (int)std::ceil(w / 40.0f);
+        for (int row = 0; row < 3; row++) {
+            const float sp = row == 0 ? 1.0f : row == 1 ? 0.7f : 0.45f, y = gy + 3.0f + row * 3.5f;
+            for (int i = 0; i < nMarks; i++) {
+                const float x = L + wrap(i * 41.0f + row * 17.0f - sc * sp, w + 20.0f) - 10.0f;
+                g.DrawLine(withA(CT::horseWind, (0.55f - row * 0.15f) * fade(x)), x, y, x + 6.0f - row * 1.5f, y, nullptr, 1.0f);
+            }
+        }
+        // Wind streaks: appear and lengthen as the MACRO opens (deterministic pseudo-random layout)
+        if (mSmooth > 0.25f) {
+            const float a = (mSmooth - 0.25f) / 0.75f;
+            uint32_t seed = 23;
+            auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.0f; };
+            const int n = (int)std::ceil(w / 22.0f);
+            for (int i = 0; i < n; i++) {
+                const float y = T + 6.0f + rnd() * (gy - T - 10.0f), len = 8.0f + 34.0f * a * (0.5f + rnd());
+                const float v = (1.6f + rnd()) * mWind * k, x = L + wrap(rnd() * (w + len) - v, w + len) - len;
+                const float al = (0.15f + 0.55f * a) * (0.5f + rnd() * 0.5f) * fade(x + len * 0.5f), lw = 0.9f + rnd() * 0.7f;
+                g.DrawLine(withA(CT::horseWind, al), x, y, x + len, y + (rnd() - 0.5f), nullptr, lw);
+            }
+        }
+        // Horse: one cell of the sprite sheet
+        if (mSheet.IsValid()) {
+            const int col = (int)(mPhase * kN) % kN;
+            g.DrawBitmap(mSheet, mHorse, (int)(col * mHorse.W()), (int)(mGait * mHorse.H()));
+        }
+        g.PathClipRegion();
+    }
+
+private:
+    struct Gait { float duty, stride, spsLo, spsHi; };
+    static constexpr int   kN = 12;
+    static constexpr float kFW = 180.0f, kGround = 110.0f;   // horse model units (UI Lab)
+
+    void step() {
+        const auto now = std::chrono::steady_clock::now();
+        const float dt = std::min(0.1f, std::chrono::duration<float>(now - mLast).count());
+        mLast = now;
+        const float m = (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
+        mSmooth += (1.0f - std::exp(-dt / 0.05f)) * (m - mSmooth);   // same 50 ms smoothing as the DSP
+        static const Gait kGaits[3] = { {0.64f, 22.0f, 0.7f, 1.0f}, {0.42f, 34.0f, 1.2f, 1.6f}, {0.30f, 52.0f, 1.8f, 2.6f} };
+        static const float lo[3] = {0.0f, 0.34f, 0.67f}, hi[3] = {0.34f, 0.67f, 1.0f};
+        // Walk / trot / gallop bands with hysteresis, stride rate rising inside each band
+        if (mGait < 2 && mSmooth > hi[mGait] + 0.02f) mGait++;
+        else if (mGait > 0 && mSmooth < lo[mGait] - 0.02f) mGait--;
+        const Gait& gt = kGaits[mGait];
+        const float f = std::clamp((mSmooth - lo[mGait]) / (hi[mGait] - lo[mGait]), 0.0f, 1.0f);
+        const float sps = gt.spsLo + (gt.spsHi - gt.spsLo) * f;
+        // Ground advances only when the frame changes, by what a planted hoof moves in one frame
+        const int prev = (int)(mPhase * kN);
+        mPhase = std::fmod(mPhase + dt * sps, 1.0f);
+        const int steps = ((int)(mPhase * kN) - prev + kN) % kN;
+        mScroll += steps * gt.stride / (gt.duty * kN);
+        mWind += dt * sps * gt.stride / gt.duty;
+    }
+
+    IRECT mHorse;
+    IBitmap mSheet;
+    std::chrono::steady_clock::time_point mLast;
+    float mSmooth{0.0f}, mPhase{0.0f}, mScroll{0.0f}, mWind{0.0f};
+    int mGait{0};
 };
 
 // ─── Main plugin class ────────────────────────────────────────────────────────
@@ -692,6 +887,7 @@ public:
 #endif
 #if IPLUG_EDITOR
     void OnUIOpen() override;
+    void OnRestoreState() override;
     bool OnMessage(int msgTag, int ctrlTag, int dataSize, const void* pData) override;
 #endif
     SampleLibrary mLibrary;
@@ -707,8 +903,14 @@ public:
     void savePreset();
     void removeFromLibrary(int idx);
     void resetPresetForSample(int idx);
+    // Reset button (X): all params back to their defaults, macro links cleared
+    void resetPreset();
     void savePersistentState() const;
     void loadPersistentState();
+    // Set a param from plugin code on the UI thread: informs the host + syncs controls
+    void setParamFromUI(int idx, double normalized);
+    // Tell the host that non-param state (sample, macro links, folder) changed
+    void markStateDirty();
 private:
     struct Voice {
         bool   active{false},inRelease{false};
@@ -720,6 +922,9 @@ private:
     std::array<Voice,kNumVoices> mVoices;
     int mVoiceTimer{0};
     std::vector<float> mSampleL,mSampleR;
+    std::mutex   mSampleMutex;   // guards sample buffers (audio thread only try_locks)
+    std::string  mSamplePath;    // loaded sample — saved with the project
+    bool loadSampleData(const std::string& path);
     int    mSampleLen{0};
     double mSampleSR{44100.0};
     EffectsChain mFX;

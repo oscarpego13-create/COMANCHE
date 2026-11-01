@@ -4,20 +4,33 @@
 #include <algorithm>
 #include <cstring>
 
-// ─── Biquad (Butterworth 2nd order, bilinear transform) ──────────────────────
-struct Biquad
+// ─── State-variable filter (Simper TPT, 2nd order Butterworth) ───────────────
+// Safe to modulate: setCutoff() only updates coefficients and keeps the
+// integrator state, so moving the cutoff never resets the filter (no clicks).
+struct SvfFilter
 {
-    float b0{1}, b1{0}, b2{0}, a1{0}, a2{0};
-    float x1{0}, x2{0}, y1{0}, y2{0};
+    enum class Mode { LP, HP };
+    Mode  mode{Mode::LP};
+    float a1{1}, a2{0}, a3{0};
+    float ic1{0}, ic2{0};
+    static constexpr float k = 1.41421356f;   // 1/Q, Q = 0.707
 
-    float process(float x) noexcept {
-        float y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2;
-        x2=x1; x1=x; y2=y1; y1=y;
-        return y;
+    void setCutoff(double sr, float freq) noexcept {
+        freq = std::clamp(freq, 10.0f, (float)(sr * 0.49));
+        const float g = (float)std::tan(3.14159265358979 * freq / sr);
+        a1 = 1.0f / (1.0f + g*(g + k));
+        a2 = g * a1;
+        a3 = g * a2;
     }
-    void reset() noexcept { x1=x2=y1=y2=0.0f; }
-    static Biquad makeHP(double sr, float freq);
-    static Biquad makeLP(double sr, float freq);
+    float process(float v0) noexcept {
+        const float v3 = v0 - ic2;
+        const float v1 = a1*ic1 + a2*v3;
+        const float v2 = ic2 + a2*ic1 + a3*v3;
+        ic1 = 2.0f*v1 - ic1;
+        ic2 = 2.0f*v2 - ic2;
+        return mode == Mode::LP ? v2 : v0 - k*v1 - v2;
+    }
+    void reset() noexcept { ic1 = ic2 = 0.0f; }
 };
 
 // ─── Freeverb-style plate reverb ─────────────────────────────────────────────
@@ -98,11 +111,10 @@ private:
     std::vector<float> delBufL, delBufR;
     int delPos{0}, delSize{0};
 
-    Biquad dlcL, dlcR, dhcL, dhcR;
-    float lastDlcFreq{-1}, lastDhcFreq{-1};
+    SvfFilter dlcL, dlcR, dhcL, dhcR;
 
     // Bitcrush on delay return (SR reduction at 2x delayHighcut)
-    Biquad bcLpL, bcLpR;          // LP to clean up bitcrush aliases (same freq as dhc)
+    SvfFilter bcLpL, bcLpR;       // LP to clean up bitcrush aliases (same freq as dhc)
     float bcHoldL{0}, bcHoldR{0};
     float bcCountL{0}, bcCountR{0};
     // Delay return pitch vibrato (macro-driven)
@@ -114,12 +126,16 @@ private:
     float choPhase{0.0f};
 
     // Tape HF rolloff (progressive LP as dist increases)
-    Biquad tapeHfL, tapeHfR;
-    float lastTapeHfFreq{-1};
+    SvfFilter tapeHfL, tapeHfR;
 
     // Output filters
-    Biquad hpL, hpR, lpL, lpR;
-    float lastHpFreq{-1}, lastLpFreq{-1};
+    SvfFilter hpL, hpR, lpL, lpR;
+
+    // Cutoffs are smoothed in log-frequency every kFilterSub samples (not once per
+    // host block), so sweeps are continuous whatever the buffer size.
+    static constexpr int kFilterSub = 16;
+    float filterSmoothCoeff{0.0f};
+    static float smoothFreq(float cur, float target, float a) noexcept;
 
     // Parameter smoothers — prevent zipper noise on rapid knob changes
     float mSmoothDistAmount{0.0f};

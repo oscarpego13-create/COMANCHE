@@ -45,34 +45,28 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 #if IPLUG_EDITOR
     mMakeGraphicsFunc = [&]() {
         return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS,
-                            GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT));
+                            GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT) * UI_SCALE);
     };
 
+    // Layout = the "Comanche UI Lab" design (v0.1.3): effects in one row, OUTPUT top-right,
+    // MACRO next to OUTPUT, horse band behind the MACRO, full-height sound panel.
     mLayoutFunc = [&](IGraphics* g) {
         g->LoadFont("RobotoMono", ROBOTO_MONO_FN);
         g->EnableMouseOver(true);
         g->AttachPanelBackground(CT::bgPrimary);
 
         const IRECT full = g->GetBounds();
+        const float W = full.W(), H = full.H();
+        const float hdrB = 32.0f, gap = 4.0f;
 
-        // ── Header row (32px) ────────────────────────────────────────────────
-        const IRECT hdr(full.L, full.T, full.R, full.T + 32.0f);
-        g->AttachControl(new ITextControl(
-            IRECT(hdr.L+12, hdr.T, hdr.L+240, hdr.B),
-            "comanche v0.1.1",
-            IText(12.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
-
-        // ── Left panel (260px): folder button + save icon + sample list ───────
-        const float panelT = full.T + 34.0f;
-        const float panelB = full.B;
-        const IRECT lp(full.L, panelT, full.L+260.0f, panelB);
-
+        // ── Sound panel (full height): folder button + save + reset + sample list ──
+        const float panelW = 190.0f;
+        const IRECT lp(0, 0, panelW, H);
         g->AttachControl(new IPanelControl(lp, CT::bgPanel));
 
-        const float btnRowT = lp.T + 4.0f;
-        const float btnRowB = btnRowT + 26.0f;
+        const float bT = 4.0f, bB = 30.0f, fbR = 116.0f;
         g->AttachControl(new ButtonControl(
-            IRECT(lp.L+4, btnRowT, lp.L+186, btnRowB),
+            IRECT(4, bT, fbR, bB),
             "Buscar librerias",
             [this](IGraphics* gr) {
                 WDL_String dir;
@@ -81,17 +75,15 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
                         mFolderPath = path.Get();
                         mLibrary.setFolder(mFolderPath);
                         savePersistentState();
+                        markStateDirty();
                         if (GetUI()) GetUI()->SetAllControlsDirty();
                     }
                 });
             }));
+        g->AttachControl(new SaveIconButton(IRECT(fbR+6, bT, fbR+32, bB), [this]() { savePreset(); }));
+        g->AttachControl(new ResetIconButton(IRECT(fbR+38, bT, fbR+64, bB), [this]() { resetPreset(); }));
 
-        g->AttachControl(new SaveIconButton(
-            IRECT(lp.L+192, btnRowT, lp.L+218, btnRowB),  // 26×26 (1:1)
-            [this]() { savePreset(); }));
-
-        const IRECT listR(lp.L+2, btnRowB+4, lp.R-2, panelB-2);
-        g->AttachControl(new SampleListControl(listR, mLibrary.getSampleNames(), mSelectedIdx,
+        g->AttachControl(new SampleListControl(IRECT(2, bB+4, panelW-2, H-2), mLibrary.getSampleNames(), mSelectedIdx,
             // OnDrop
             [this](const std::string& filePath) {
                 size_t slash = filePath.find_last_of("/\\");
@@ -99,6 +91,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
                 mFolderPath = filePath.substr(0, slash);
                 mLibrary.setFolder(mFolderPath);
                 savePersistentState();
+                markStateDirty();
                 for (int i = 0; i < (int)mLibrary.getSampleNames().size(); i++) {
                     if (mLibrary.getSamplePath(i) == filePath) { loadSample(i); break; }
                 }
@@ -110,36 +103,43 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             [this](int idx) { resetPresetForSample(idx); }
         ));
 
-        // ── Right panel ────────────────────────────────────────────────────────
-        const IRECT rp(full.L+260.0f, panelT, full.R, panelB);
+        // ── Header: signature, top right ────────────────────────────────────────
+        g->AttachControl(new ITextControl(
+            IRECT(W-260, 0, W-12, hdrB), "@laclave.pro v0.1.3",
+            IText(8.0f, CT::textInk, "RobotoMono", EAlign::Far, EVAlign::Middle)));
 
-        // ── MACRO knob (centred, top) ─────────────────────────────────────────
-        const float mKW = 108, mKH = 130;
-        const float mKX = rp.MW() - mKW*0.5f;
-        const float mKY = rp.T + 8.0f;
-        g->AttachControl(new ComanacheKnob(
-            IRECT(mKX, mKY, mKX+mKW, mKY+mKH),
-            kMacro, "MACRO", CT::knobGold, true));
+        // ── Right side geometry ────────────────────────────────────────────────
+        const float rL = panelW, rR = W, rT = hdrB + 2.0f;
+        const float r1T = rT + 173.0f, bH = 110.0f, boxW = 90.0f;
+        const float kw = 58.0f, kh = kw * 90.0f / 70.0f;          // every knob but the MACRO
+        const float dlW = 8 + kw + 8 + kw + 16 + kw + 4 + 36 + 8;  // DELAY box fits its content
+        const float outW = 112.0f;
+        const IRECT boxReverb(rL+gap,          r1T, rL+gap+boxW,          r1T+bH);
+        const IRECT boxDist  (boxReverb.R+gap, r1T, boxReverb.R+gap+boxW, r1T+bH);
+        const IRECT boxDelay (boxDist.R+gap,   r1T, boxDist.R+gap+dlW,    r1T+bH);
+        const IRECT boxChorus(boxDelay.R+gap,  r1T, boxDelay.R+gap+boxW,  r1T+bH);
+        const IRECT boxOutput(rR-gap-outW, rT+gap, rR-gap, r1T-gap);
 
-        // ── Effect group boxes layout ─────────────────────────────────────────
-        const float r1T  = rp.T + 148.0f;
-        const float boxH = 168.0f;
-        const float r2T  = r1T + boxH + 6.0f;
-        const float bxL  = rp.L + 6.0f;
+        // MACRO sits just left of OUTPUT; the horse band runs from the sound panel to OUTPUT, behind it
+        const float mW = 121.0f, mH = mW * 130.0f / 108.0f, mX = boxOutput.L - 4.0f - mW*0.5f;
+        const IRECT band(rL+1, rT+gap, boxOutput.L-gap, r1T-gap);
+        const float hR = mX - mW*0.5f - 4.0f, hL = std::max(band.L + 6.0f, hR - 208.0f);
+        // Sprite cells were baked at 202x135 (horse scale 202/180), bottom-aligned in the band
+        const float hx = hL + ((hR - hL) - HORSE_FRAME_W) * 0.5f;
+        const IRECT horse(hx, band.B - 2.0f - HORSE_FRAME_H, hx + HORSE_FRAME_W, band.B - 2.0f);
+        g->AttachControl(new HorseScene(band, horse, g->LoadBitmap(HORSE_FN)));
 
-        // Row 1: REVERB(138) | DIST(178) | DELAY(rest)
-        const float rvW = 138.0f;
-        const float dtW = 178.0f;
-        const float dlW = rp.R - bxL - rvW - 6 - dtW - 6 - 6;
+        // COMANCHERIA logo centred over the horse (artwork from the pack cover)
+        {
+            const float lw = 340.0f, lh = lw * 21.0f / 340.0f;
+            const float lx = std::clamp(horse.MW() - lw*0.5f, band.L + 4.0f, band.R - 4.0f - lw), ly = band.T - 26.0f;
+            g->AttachControl(new LogoControl(IRECT(lx, ly, lx+lw, ly+lh), g->LoadBitmap(TITLE_FN)));
+        }
 
-        const IRECT boxReverb(bxL,             r1T, bxL+rvW,           r1T+boxH);
-        const IRECT boxDist  (bxL+rvW+6,       r1T, bxL+rvW+6+dtW,     r1T+boxH);
-        const IRECT boxDelay (bxL+rvW+6+dtW+6, r1T, rp.R-6,            r1T+boxH);
+        g->AttachControl(new ComanacheKnob(IRECT(mX - mW*0.5f, rT+8, mX + mW*0.5f, rT+8+mH),
+                                           kMacro, "MACRO", CT::knobGold, true));
 
-        // Row 2: CHORUS(138) | OUTPUT(rest)
-        const IRECT boxChorus(bxL,        r2T, bxL+rvW,  r2T+boxH);
-        const IRECT boxOutput(bxL+rvW+6,  r2T, rp.R-6,   r2T+boxH);
-
+        // ── Effect boxes ──────────────────────────────────────────────────────
         g->AttachControl(new IPanelControl(boxReverb, CT::boxReverb));
         g->AttachControl(new IPanelControl(boxDist,   CT::boxDist));
         g->AttachControl(new IPanelControl(boxDelay,  CT::boxDelay));
@@ -148,9 +148,8 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 
         auto addTitle = [&](const IRECT& box, const char* label) {
             g->AttachControl(new ITextControl(
-                IRECT(box.L+6, box.T+3, box.R-6, box.T+16),
-                label,
-                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Near, EVAlign::Middle)));
+                IRECT(box.L+6, box.T+3, box.R-6, box.T+16), label,
+                IText(9.0f, CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle)));
         };
         addTitle(boxReverb, "REVERB");
         addTitle(boxDist,   "DIST");
@@ -158,113 +157,54 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         addTitle(boxChorus, "CHORUS");
         addTitle(boxOutput, "OUTPUT");
 
-        auto addKnob = [&](const IRECT& knobR, int param, const char* lbl, IColor fill) {
-            g->AttachControl(new ComanacheKnob(knobR, param, lbl, fill, false, &mMacroLink[param], mParamMod));
-            g->AttachControl(new MacroLinkButton(
-                IRECT(knobR.R-10, knobR.T, knobR.R, knobR.T+10), mMacroLink[param]));
+        auto addKnob = [&](float x, float y, int param, const char* lbl, IColor fill) {
+            const IRECT r(x, y, x+kw, y+kh);
+            g->AttachControl(new ComanacheKnob(r, param, lbl, fill, false, &mMacroLink[param], mParamMod));
+            g->AttachControl(new MacroLinkButton(IRECT(r.R-10, r.T, r.R, r.T+10), mMacroLink[param],
+                                                 [this]() { markStateDirty(); }));
         };
+        // Selector row (decay, DIST mode, TEMPO): centred on the knob label line
+        const float kY = r1T + 18.0f;
+        const float selY = kY + 0.7f*kw + UI::kLabelGap + 2.0f + 1.0f;
 
-        // ── REVERB box ────────────────────────────────────────────────────────
+        // REVERB: knob + decay value
         {
-            const float kW=70, kH=90;
-            const float kX = boxReverb.MW() - kW*0.5f;
-            const float kY = boxReverb.T + 18.0f;
-            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kReverbAmount, "REVERB", CT::knobBlue);
-
-            // Reverb decay drag-value + macro link
-            const float dvW=60, dvH=18;
-            const float dvX = boxReverb.MW() - dvW*0.5f - 8.0f;
-            const float dvY = kY + kH + 4.0f;
-            g->AttachControl(new TinyDragValue(
-                IRECT(dvX, dvY, dvX+dvW, dvY+dvH), kReverbDecay));
-            g->AttachControl(new ITextControl(
-                IRECT(dvX, dvY+dvH+1, dvX+dvW, dvY+dvH+11),
-                "decay",
-                IText(8.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
-            g->AttachControl(new MacroLinkButton(
-                IRECT(dvX+dvW+3, dvY+4, dvX+dvW+3+10, dvY+4+10),
-                mMacroLink[kReverbDecay]));
+            addKnob(boxReverb.MW() - kw*0.5f, kY, kReverbAmount, "", CT::knobBlue);
+            const float dvW = 60, dvH = 18, dvX = boxReverb.MW() - dvW*0.5f - 8.0f;
+            g->AttachControl(new TinyDragValue(IRECT(dvX, selY, dvX+dvW, selY+dvH), kReverbDecay));
+            g->AttachControl(new MacroLinkButton(IRECT(dvX+dvW+3, selY+4, dvX+dvW+13, selY+14),
+                                                 mMacroLink[kReverbDecay], [this]() { markStateDirty(); }));
         }
-
-        // ── DIST box ─────────────────────────────────────────────────────────
+        // DIST: knob + one button cycling CLIP → TAPE → TUBE
         {
-            const float kW=66, kH=90;
-            const float kX = boxDist.L + 8.0f;
-            const float kY = boxDist.T + 18.0f;
-            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kDistAmount, "Distorsion", CT::knobGold);
-
-            const float bX=kX+kW+8, bW=56, bH=22, bGap=4;
-            const float totalBH=3*bH+2*bGap;
-            const float bY=kY+(kH-totalBH)*0.5f;
-            g->AttachControl(new ModeButton(IRECT(bX,bY,               bX+bW,bY+bH),           kDistMode,0,"CLIP"));
-            g->AttachControl(new ModeButton(IRECT(bX,bY+bH+bGap,       bX+bW,bY+2*bH+bGap),   kDistMode,1,"TAPE"));
-            g->AttachControl(new ModeButton(IRECT(bX,bY+2*(bH+bGap),   bX+bW,bY+2*(bH+bGap)+bH), kDistMode,2,"TUBE"));
+            addKnob(boxDist.MW() - kw*0.5f, kY, kDistAmount, "", CT::knobGold);
+            g->AttachControl(new CycleModeButton(IRECT(boxDist.MW()-28, selY, boxDist.MW()+28, selY+18),
+                                                 kDistMode, "CLIP", "TAPE", "TUBE"));
         }
-
-        // ── DELAY box ────────────────────────────────────────────────────────
+        // DELAY: Cantidad · TIME (+ TEMPO) · FEEDBK · FILTER
         {
-            const float kW=60, kH=84;
-            const float kY = boxDelay.T + 18.0f;
-            const float kXa = boxDelay.L + 8.0f;   // TIME knob
-            const float kXb = kXa + kW + 8.0f;     // FEEDBACK knob
-            const float kXc = kXb + kW + 16.0f;    // MIX / Cantidad knob
+            const float xMix = boxDelay.L + 8.0f, xTime = xMix + kw + 16.0f, xFb = xTime + kw + 8.0f;
+            addKnob(xMix, kY, kDelayMix, "", CT::knobBlue);
+            g->AttachControl(new DelayTimeKnob(IRECT(xTime, kY, xTime+kw, kY+kh), CT::knobGrey));
+            addKnob(xFb, kY, kDelayFeedback, "FEEDBK", CT::knobGrey);
+            g->AttachControl(new TempoToggleButton(IRECT(xTime, selY, xTime+kw, selY+18.0f), kDelaySyncMode));
 
-            g->AttachControl(new DelayTimeKnob(IRECT(kXa,kY,kXa+kW,kY+kH), CT::knobGrey));
-            addKnob(IRECT(kXb,kY,kXb+kW,kY+kH), kDelayFeedback, "FEEDBK",  CT::knobGrey);
-            addKnob(IRECT(kXc,kY,kXc+kW,kY+kH), kDelayMix,      "Cantidad",CT::knobBlue);
-
-            // TEMPO toggle button below TIME knob
-            const float sbT = kY + kH + 4.0f;
-            g->AttachControl(new TempoToggleButton(
-                IRECT(kXa, sbT, kXa+kW, sbT+18.0f), kDelaySyncMode));
-
-            // BandFilterSlider for delay filter (right portion)
-            const float bfsW=36, bfsH=boxH-28.0f;
-            const float bfsX=boxDelay.R-8.0f-bfsW;
-            const float bfsY=boxDelay.T+18.0f;
-            g->AttachControl(new BandFilterSlider(
-                IRECT(bfsX, bfsY, bfsX+bfsW, bfsY+bfsH),
-                kDelayLowcut, kDelayHighcut));
-            g->AttachControl(new ITextControl(
-                IRECT(bfsX-2, boxDelay.T+3, bfsX+bfsW+2, boxDelay.T+16),
-                "FILTER",
-                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
+            const float fX = xFb + kw + 4.0f, fW = 36.0f, fY = boxDelay.T + 18.0f, fH = bH - 28.0f;
+            g->AttachControl(new BandFilterSlider(IRECT(fX, fY, fX+fW, fY+fH), kDelayLowcut, kDelayHighcut));
+            g->AttachControl(new ITextControl(IRECT(fX-2, boxDelay.T+3, fX+fW+2, boxDelay.T+16), "FILTER",
+                IText(9.0f, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle)));
         }
+        // CHORUS
+        addKnob(boxChorus.MW() - kw*0.5f, kY, kChorusAmount, "", CT::knobBlue);
 
-        // ── CHORUS box ───────────────────────────────────────────────────────
+        // OUTPUT: VU + volume fader, HP/LP band filter
         {
-            const float kW=70, kH=90;
-            const float kX = boxChorus.MW() - kW*0.5f;
-            const float kY = boxChorus.T + 18.0f;
-            addKnob(IRECT(kX,kY,kX+kW,kY+kH), kChorusAmount, "CHORUS", CT::knobBlue);
-        }
-
-        // ── OUTPUT box ───────────────────────────────────────────────────────
-        {
-            const float innerL = boxOutput.L + 8.0f;
-            const float innerT = boxOutput.T + 18.0f;
-            const float innerB = boxOutput.B - 14.0f;
-
-            // VolumeSlider (VU L+R + fader) with 0dB mark
-            const float vsW=46.0f;
-            g->AttachControl(new VolumeSlider(
-                IRECT(innerL, innerT, innerL+vsW, innerB),
-                kOutputVol, &mVuPeakL, &mVuPeakR));
-            g->AttachControl(new ITextControl(
-                IRECT(innerL, innerB+1, innerL+vsW, innerB+13),
-                "VOL",
-                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
-
-            // BandFilterSlider for output HP/LP (vertical, beside vol)
-            const float bfsW=36.0f;
-            const float bfsX=innerL+vsW+10.0f;
-            g->AttachControl(new BandFilterSlider(
-                IRECT(bfsX, innerT, bfsX+bfsW, innerB),
-                kHpFreq, kLpFreq, 20.0f, 20000.0f));
-            g->AttachControl(new ITextControl(
-                IRECT(bfsX-2, boxOutput.T+3, bfsX+bfsW+2, boxOutput.T+16),
-                "FILTER",
-                IText(9.0f, CT::fgPrimary, "RobotoMono", EAlign::Center, EVAlign::Middle)));
+            const float iL = boxOutput.L + 8.0f, iT = boxOutput.T + 18.0f, iB = boxOutput.B - 14.0f;
+            g->AttachControl(new VolumeSlider(IRECT(iL, iT, iL+46.0f, iB), kOutputVol, &mVuPeakL, &mVuPeakR));
+            const float fX = iL + 56.0f;
+            g->AttachControl(new BandFilterSlider(IRECT(fX, iT, fX+36.0f, iB), kHpFreq, kLpFreq, 20.0f, 20000.0f));
+            g->AttachControl(new ITextControl(IRECT(fX-2, boxOutput.T+3, fX+38, boxOutput.T+16), "FILTER",
+                IText(9.0f, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle)));
         }
     };
 #endif
@@ -293,6 +233,10 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     std::fill(mTmpL, mTmpL+n, 0.0f);
     std::fill(mTmpR, mTmpR+n, 0.0f);
 
+    // Never block the audio thread: if a sample is being swapped in, skip the voices this block
+    std::unique_lock<std::mutex> sampleLock(mSampleMutex, std::try_to_lock);
+    const bool haveSample = sampleLock.owns_lock() && mSampleLen > 0;
+
     for (int s = 0; s < n; s++) {
         while (!mMidiQueue.Empty()) {
             auto msg = mMidiQueue.Peek();
@@ -306,7 +250,7 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
                 noteOff(msg.NoteNumber());
         }
 
-        if (mSampleLen > 0) {
+        if (haveSample) {
             for (auto& v : mVoices) {
                 if (!v.active) continue;
                 if (v.srcPos >= mSampleLen) { v.active=false; continue; }
@@ -323,6 +267,7 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
         }
         mVoiceTimer++;
     }
+    if (sampleLock.owns_lock()) sampleLock.unlock();
 
     const float macroRaw = (float)GetParam(kMacro)->GetNormalized();
     // Smooth macro before applying to DSP — prevents zipper noise and pitch jumps
@@ -450,8 +395,7 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     chunk.Put(&kSerializeMagic);
     WDL_String folder(mFolderPath.c_str());
     chunk.PutStr(folder.Get());
-    std::string samplePath = (mSelectedIdx >= 0) ? mLibrary.getSamplePath(mSelectedIdx) : "";
-    WDL_String sp(samplePath.c_str());
+    WDL_String sp(mSamplePath.c_str());
     chunk.PutStr(sp.Get());
     for (int i = 0; i < kNumParams; i++) chunk.Put(&mMacroLink[i]);
     return SerializeParams(chunk);
@@ -472,28 +416,29 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
 
         WDL_String sp;
         pos = chunk.GetStr(sp, pos);
-        const std::string samplePath = sp.Get();
+        // Keep the path even if the file is missing right now, so re-saving the
+        // project doesn't drop the reference (e.g. external drive not mounted)
+        mSamplePath = sp.Get();
+        mSelectedIdx = -1;
 
-        if (!samplePath.empty()) {
-            std::vector<float> left, right;
-            int numCh; double fileSr;
-            if (mLibrary.loadSample(samplePath, left, right, numCh, fileSr)) {
-                mSampleL   = std::move(left);
-                mSampleR   = std::move(right);
-                mSampleLen = (int)mSampleL.size();
-                mSampleSR  = fileSr;
-                mSelectedIdx = -1;
-                const auto& paths = mLibrary.getSamplePaths();
-                for (int i = 0; i < (int)paths.size(); i++) {
-                    if (paths[i] == samplePath) { mSelectedIdx = i; break; }
-                }
-                for (auto& v : mVoices) v.active = false;
+        if (mSamplePath.empty() || !loadSampleData(mSamplePath)) {
+            std::lock_guard<std::mutex> lock(mSampleMutex);
+            mSampleL.clear(); mSampleR.clear(); mSampleLen = 0;
+        } else {
+            const auto& paths = mLibrary.getSamplePaths();
+            for (int i = 0; i < (int)paths.size(); i++) {
+                if (paths[i] == mSamplePath) { mSelectedIdx = i; break; }
             }
         }
+        // Point the preset manager at the sample so the save icon works after reopening.
+        // Only reads the JSON — params come from the project chunk below, not the preset file.
+        if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
     } else {
         // v1 (old saves): folder + params only, no sample
+        mSamplePath.clear();
+        mSelectedIdx = -1;
         WDL_String folder;
         pos = chunk.GetStr(folder, pos);
         mFolderPath = folder.Get();
@@ -511,6 +456,15 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
 
 void COMANCHE::OnUIOpen()
 {
+    // Sync control values with params — controls cache their value for drag start
+    SendCurrentParamValuesFromDelegate();
+    if (GetUI()) GetUI()->SetAllControlsDirty();
+}
+
+void COMANCHE::OnRestoreState()
+{
+    Plugin::OnRestoreState();
+    // Sample list + macro links aren't params, redraw them too
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
 
@@ -528,37 +482,46 @@ bool COMANCHE::OnMessage(int msgTag, int, int /*dataSize*/, const void* pData)
 
 // ─── Sample + preset helpers ──────────────────────────────────────────────────
 
-void COMANCHE::loadSample(int idx)
+bool COMANCHE::loadSampleData(const std::string& path)
 {
-    std::string path = mLibrary.getSamplePath(idx);
-    if (path.empty()) return;
-
     std::vector<float> left, right;
     int numCh; double sr;
-    if (!mLibrary.loadSample(path, left, right, numCh, sr)) return;
+    if (!mLibrary.loadSample(path, left, right, numCh, sr)) return false;
 
+    std::lock_guard<std::mutex> lock(mSampleMutex);
     mSampleL   = std::move(left);
     mSampleR   = std::move(right);
     mSampleLen = (int)mSampleL.size();
     mSampleSR  = sr;
-    mSelectedIdx = idx;
-
     for (auto& v : mVoices) v.active = false;
+    return true;
+}
+
+void COMANCHE::loadSample(int idx)
+{
+    std::string path = mLibrary.getSamplePath(idx);
+    if (path.empty() || !loadSampleData(path)) return;
+
+    mSamplePath  = path;
+    mSelectedIdx = idx;
 
     // Reset to defaults, then restore saved preset (if any)
     mPresets.onSampleLoaded(path);
+    double norm[kNumParams];
     for (int pi = 0; pi < kNumParams; pi++)
-        GetParam(pi)->SetNormalized(GetParam(pi)->GetDefault(true));
+        norm[pi] = GetParam(pi)->GetDefault(true);
     for (auto& kv : mPresets.getValues()) {
         for (int pi = 0; pi < kNumParams; pi++) {
             auto* p = GetParam(pi);
             if (std::string(p->GetName()) == kv.first) {
-                p->SetNormalized(p->ToNormalized(kv.second));
+                norm[pi] = p->ToNormalized(kv.second);
                 break;
             }
         }
     }
-    // Knobs/sliders read from GetParam()->GetNormalized() directly in Draw(), so dirty is enough
+    for (int pi = 0; pi < kNumParams; pi++)
+        setParamFromUI(pi, norm[pi]);
+    markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
 
@@ -590,9 +553,40 @@ void COMANCHE::resetPresetForSample(int idx)
     // If this is the currently loaded sample, reset params to defaults
     if (idx == mSelectedIdx) {
         for (int pi = 0; pi < kNumParams; pi++)
-            GetParam(pi)->SetNormalized(GetParam(pi)->GetDefault(true));
+            setParamFromUI(pi, GetParam(pi)->GetDefault(true));
         if (GetUI()) GetUI()->SetAllControlsDirty();
     }
+}
+
+void COMANCHE::resetPreset()
+{
+    for (int pi = 0; pi < kNumParams; pi++)
+        setParamFromUI(pi, GetParam(pi)->GetDefault(true));
+    for (int pi = 0; pi < kNumParams; pi++) mMacroLink[pi] = 0;
+    markStateDirty();
+    if (GetUI()) GetUI()->SetAllControlsDirty();
+}
+
+// ─── Host notification ────────────────────────────────────────────────────────
+// Setting IParam values directly is invisible to the host: it neither marks the
+// project as modified nor updates its own copy of the value. Always go through here.
+
+void COMANCHE::setParamFromUI(int idx, double normalized)
+{
+    BeginInformHostOfParamChangeFromUI(idx);
+    SendParameterValueFromUI(idx, normalized);
+    EndInformHostOfParamChangeFromUI(idx);
+    SendParameterValueFromDelegate(idx, normalized, true);
+}
+
+void COMANCHE::markStateDirty()
+{
+#if defined VST3_API
+    setDirty(true);  // IComponentHandler2 — ignored by hosts that don't support it
+#endif
+    // Some hosts (Ableton Live) only flag the project as modified on parameter
+    // edits, so re-send the macro's current value as a no-op edit.
+    setParamFromUI(kMacro, GetParam(kMacro)->GetNormalized());
 }
 
 // ─── Cross-session persistence (independent of DAW project) ──────────────────
