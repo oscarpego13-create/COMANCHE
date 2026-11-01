@@ -73,7 +73,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
                 gr->PromptForDirectory(dir, [this](const WDL_String& /*name*/, const WDL_String& path) {
                     if (path.GetLength() > 0) {
                         mFolderPath = path.Get();
-                        mLibrary.setFolder(mFolderPath);
+                        { mLibrary.setFolder(mFolderPath); startClassification(); }
                         savePersistentState();
                         markStateDirty();
                         if (GetUI()) GetUI()->SetAllControlsDirty();
@@ -83,13 +83,18 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         g->AttachControl(new SaveIconButton(IRECT(fbR+6, bT, fbR+32, bB), [this]() { savePreset(); }));
         g->AttachControl(new ResetIconButton(IRECT(fbR+38, bT, fbR+64, bB), [this]() { resetPreset(); }));
 
-        g->AttachControl(new SampleListControl(IRECT(2, bB+4, panelW-2, H-2), mLibrary.getSampleNames(), mSelectedIdx,
+        // Type filter: TODO · BASS · LEAD / PAD · KEYS
+        g->AttachControl(new TypeFilterBar(IRECT(4, bB+4, panelW-4, bB+20), mTypeFilter,
+            [this]() { if (GetUI()) GetUI()->SetAllControlsDirty(); }));
+
+        g->AttachControl(new SampleListControl(IRECT(2, bB+24, panelW-2, H-2), mLibrary.getSampleNames(), mSelectedIdx,
+            [this](int i) { return soundTypeOf(i); }, mTypeFilter, mTypesVersion,
             // OnDrop
             [this](const std::string& filePath) {
                 size_t slash = filePath.find_last_of("/\\");
                 if (slash == std::string::npos) return;
                 mFolderPath = filePath.substr(0, slash);
-                mLibrary.setFolder(mFolderPath);
+                { mLibrary.setFolder(mFolderPath); startClassification(); }
                 savePersistentState();
                 markStateDirty();
                 for (int i = 0; i < (int)mLibrary.getSampleNames().size(); i++) {
@@ -103,10 +108,30 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             [this](int idx) { resetPresetForSample(idx); }
         ));
 
-        // ── Header: signature, top right ────────────────────────────────────────
-        g->AttachControl(new ITextControl(
-            IRECT(W-260, 0, W-12, hdrB), "@laclave.pro v0.1.3",
-            IText(8.0f, CT::textInk, "RobotoMono", EAlign::Far, EVAlign::Middle)));
+        // ── Header: signature top right, settings gear just left of it ───────────
+        {
+            const IText sigText(8.0f, CT::textInk, "RobotoMono", EAlign::Far, EVAlign::Middle);
+            const char* sig = "@laclave.pro v0.1.3";
+            g->AttachControl(new ITextControl(IRECT(W-260, 0, W-12, hdrB), sig, sigText));
+            IRECT tb;
+            const float tw = g->MeasureText(sigText, sig, tb);
+            const float gx = W - 12.0f - tw - 8.0f, gs = 12.0f;
+            g->AttachControl(new SettingsGear(IRECT(gx-gs, hdrB*0.5f-gs*0.5f, gx, hdrB*0.5f+gs*0.5f),
+                [this](IPopupMenu& menu) {
+                    menu.AddItem("Loop en Bass y Lead / Pad (tocar sostenido)", -1,
+                                 mLoopEnabled ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
+                    menu.AddSeparator();
+                    menu.AddItem("Polifónico", -1, !mMono ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
+                    menu.AddItem("Monofónico", -1,  mMono ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
+                },
+                [this](int chosen) {
+                    if (chosen == 0) setLoopEnabled(!mLoopEnabled);
+                    else if (chosen == 2) mMono = false;
+                    else if (chosen == 3) mMono = true;
+                    else return;
+                    markStateDirty();
+                }));
+        }
 
         // ── Right side geometry ────────────────────────────────────────────────
         const float rL = panelW, rR = W, rT = hdrB + 2.0f;
@@ -251,8 +276,12 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
         }
 
         if (haveSample) {
+            const std::vector<float>& srcL = mLoopActive ? mLoopL : mSampleL;
+            const std::vector<float>& srcR = mLoopActive ? mLoopR : mSampleR;
             for (auto& v : mVoices) {
                 if (!v.active) continue;
+                // Looping types (Bass, Lead / Pad) wrap inside the crossfaded loop until released
+                if (mLoopActive && v.srcPos >= mLoopEnd) v.srcPos -= (double)(mLoopEnd - mLoopStart);
                 if (v.srcPos >= mSampleLen) { v.active=false; continue; }
                 float env = v.level;
                 if (v.inRelease) {
@@ -260,8 +289,8 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
                     env *= v.relLeft / v.relTotal;
                     v.relLeft -= 1.0f;
                 }
-                mTmpL[s] += lerp(mSampleL, v.srcPos) * env;
-                mTmpR[s] += lerp(mSampleR, v.srcPos) * env;
+                mTmpL[s] += lerp(srcL, v.srcPos) * env;
+                mTmpR[s] += lerp(srcR, v.srcPos) * env;
                 v.srcPos  += v.pitchRatio;
             }
         }
@@ -359,6 +388,14 @@ int COMANCHE::stealVoice()
 
 void COMANCHE::noteOn(int note, float vel)
 {
+    // Mono: a new note fades out whatever is playing (5 ms) before starting
+    if (mMono) {
+        for (auto& v : mVoices)
+            if (v.active && !v.inRelease) {
+                v.inRelease = true;
+                v.relTotal = v.relLeft = 0.005f * (float)GetSampleRate();
+            }
+    }
     int vi = -1;
     for (int i = 0; i < kNumVoices; i++)
         if (!mVoices[i].active) { vi=i; break; }
@@ -386,9 +423,11 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
-// Format v2: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [params]
+// Format v3: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [params]
+// Format v2: same without loop/mono
 // Format v1 (old, broken): [folder(str)] [params]  — sample was never saved
-static constexpr int kSerializeMagic = 0x434F4D32; // 'COM2'
+static constexpr int kSerializeMagicV2 = 0x434F4D32; // 'COM2'
+static constexpr int kSerializeMagic   = 0x434F4D33; // 'COM3'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
@@ -398,6 +437,9 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     WDL_String sp(mSamplePath.c_str());
     chunk.PutStr(sp.Get());
     for (int i = 0; i < kNumParams; i++) chunk.Put(&mMacroLink[i]);
+    const int loop = mLoopEnabled ? 1 : 0, mono = mMono ? 1 : 0;
+    chunk.Put(&loop);
+    chunk.Put(&mono);
     return SerializeParams(chunk);
 }
 
@@ -406,13 +448,13 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
-    if (afterMagic > pos && magic == kSerializeMagic) {
-        // v2: full restore
+    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV2)) {
+        // v2 / v3: full restore
         pos = afterMagic;
         WDL_String folder;
         pos = chunk.GetStr(folder, pos);
         mFolderPath = folder.Get();
-        if (!mFolderPath.empty()) mLibrary.setFolder(mFolderPath);
+        if (!mFolderPath.empty()) { mLibrary.setFolder(mFolderPath); startClassification(); }
 
         WDL_String sp;
         pos = chunk.GetStr(sp, pos);
@@ -435,6 +477,13 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
+        if (magic == kSerializeMagic) {
+            int loop = 1, mono = 0;
+            pos = chunk.Get(&loop, pos);
+            pos = chunk.Get(&mono, pos);
+            mMono = mono != 0;
+            setLoopEnabled(loop != 0);
+        }
     } else {
         // v1 (old saves): folder + params only, no sample
         mSamplePath.clear();
@@ -442,7 +491,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         WDL_String folder;
         pos = chunk.GetStr(folder, pos);
         mFolderPath = folder.Get();
-        if (!mFolderPath.empty()) mLibrary.setFolder(mFolderPath);
+        if (!mFolderPath.empty()) { mLibrary.setFolder(mFolderPath); startClassification(); }
     }
 
     return UnserializeParams(chunk, pos);
@@ -488,13 +537,117 @@ bool COMANCHE::loadSampleData(const std::string& path)
     int numCh; double sr;
     if (!mLibrary.loadSample(path, left, right, numCh, sr)) return false;
 
+    // Type: cached from the library analysis, else name, else this audio
+    SoundType type = SoundType::Pending;
+    {
+        std::lock_guard<std::mutex> lock(mTypesMutex);
+        auto it = mTypes.find(path);
+        if (it != mTypes.end()) type = it->second;
+    }
+    if (type == SoundType::Pending) {
+        type = SoundClassifier::fromName(path);
+        if (type == SoundType::Pending) type = SoundClassifier::fromAudio(left, right, sr);
+        std::lock_guard<std::mutex> lock(mTypesMutex);
+        mTypes[path] = type;
+        mTypesVersion++;
+    }
+    // Loop copy: the end of the loop region is crossfaded with the audio just before its start,
+    // so jumping from loopEnd back to loopStart is seamless
+    int ls = 0, le = 0;
+    std::vector<float> loopL, loopR;
+    const bool hasLoop = SoundClassifier::findLoop(left, right, sr, ls, le);
+    if (hasLoop) {
+        loopL = left; loopR = right;
+        const int xf = std::min((int)(sr * 0.03), (le - ls) / 4);
+        for (int i = 0; i < xf; i++) {
+            const float f = (float)i / (float)xf;
+            const int d = le - xf + i, s = ls - xf + i;
+            loopL[d] = left[d] * (1.0f - f) + left[s] * f;
+            if (!right.empty()) loopR[d] = right[d] * (1.0f - f) + right[s] * f;
+        }
+    }
+
     std::lock_guard<std::mutex> lock(mSampleMutex);
     mSampleL   = std::move(left);
     mSampleR   = std::move(right);
     mSampleLen = (int)mSampleL.size();
     mSampleSR  = sr;
+    mLoopL     = std::move(loopL);
+    mLoopR     = std::move(loopR);
+    mLoopStart = ls;
+    mLoopEnd   = le;
+    mHasLoop   = hasLoop;
+    mSampleType = type;
+    updateLoopActive();
     for (auto& v : mVoices) v.active = false;
     return true;
+}
+
+void COMANCHE::updateLoopActive()
+{
+    mLoopActive = mHasLoop && mLoopEnabled && SoundClassifier::loops(mSampleType)
+               && mLoopL.size() == mSampleL.size() && mLoopEnd <= mSampleLen;
+}
+
+void COMANCHE::setLoopEnabled(bool on)
+{
+    mLoopEnabled = on;
+    std::lock_guard<std::mutex> lock(mSampleMutex);
+    updateLoopActive();
+}
+
+// ─── Library classification (background) ─────────────────────────────────────
+
+SoundType COMANCHE::soundTypeOf(int libraryIdx)
+{
+    const std::string path = mLibrary.getSamplePath(libraryIdx);
+    std::lock_guard<std::mutex> lock(mTypesMutex);
+    auto it = mTypes.find(path);
+    return it != mTypes.end() ? it->second : SoundType::Pending;
+}
+
+// Names first (instant), then the audio of the remaining samples one by one on a worker thread.
+// Results land in mTypes; the list redraws when mTypesVersion changes.
+void COMANCHE::startClassification()
+{
+    stopClassification();
+    std::vector<std::string> todo;
+    {
+        std::lock_guard<std::mutex> lock(mTypesMutex);
+        for (const auto& p : mLibrary.getSamplePaths()) {
+            if (mTypes.count(p)) continue;
+            const SoundType t = SoundClassifier::fromName(p);
+            if (t != SoundType::Pending) mTypes[p] = t;
+            else todo.push_back(p);
+        }
+    }
+    mTypesVersion++;
+    if (todo.empty()) return;
+    mClassifyStop = false;
+    mClassifyThread = std::thread([this, todo = std::move(todo)]() {
+        for (const auto& p : todo) {
+            if (mClassifyStop) return;
+            std::vector<float> l, r; int ch = 0; double sr = 0;
+            const SoundType t = mLibrary.loadSample(p, l, r, ch, sr) ? SoundClassifier::fromAudio(l, r, sr)
+                                                                      : SoundType::Other;
+            {
+                std::lock_guard<std::mutex> lock(mTypesMutex);
+                mTypes[p] = t;
+            }
+            mTypesVersion++;
+        }
+    });
+}
+
+void COMANCHE::stopClassification()
+{
+    mClassifyStop = true;
+    if (mClassifyThread.joinable()) mClassifyThread.join();
+}
+
+COMANCHE::~COMANCHE()
+{
+    stopClassification();
 }
 
 void COMANCHE::loadSample(int idx)
@@ -625,5 +778,5 @@ void COMANCHE::loadPersistentState()
     if (b == std::string::npos) return;
     mFolderPath = text.substr(a, b - a);
     if (!mFolderPath.empty() && fs::is_directory(mFolderPath))
-        mLibrary.setFolder(mFolderPath);
+        { mLibrary.setFolder(mFolderPath); startClassification(); }
 }

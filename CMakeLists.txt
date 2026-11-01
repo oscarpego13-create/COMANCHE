@@ -17,6 +17,8 @@ iplug_add_plugin(${PROJECT_NAME}
     EffectsChain.h
     SampleLibrary.cpp
     SampleLibrary.h
+    SoundClassifier.cpp
+    SoundClassifier.h
     PresetManager.cpp
     PresetManager.h
     resources/resource.h

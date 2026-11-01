@@ -14,10 +14,13 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <unordered_map>
 
 #include "EffectsChain.h"
 #include "SampleLibrary.h"
 #include "PresetManager.h"
+#include "SoundClassifier.h"
 
 using namespace iplug;
 using namespace igraphics;
@@ -351,48 +354,80 @@ private:
     mutable int mLastSync{-1};
 };
 
-// ─── Scrollable sample list with scrollbar ───────────────────────────────────
+// ─── Scrollable sample list with scrollbar, type badges and type filter ──────
+// Rows show only the samples matching the current filter; mSelected stays a library index.
 class SampleListControl final : public IControl
 {
 public:
     using OnDropFn        = std::function<void(const std::string&)>;
     using OnRemoveFn      = std::function<void(int)>;
     using OnResetPresetFn = std::function<void(int)>;
+    using TypeOfFn        = std::function<SoundType(int)>;
 
     SampleListControl(const IRECT& b, const std::vector<std::string>& names, int& sel,
+                      TypeOfFn typeOf, const int& filter, const std::atomic<int>& typesVersion,
                       OnDropFn dropFn={}, OnRemoveFn removeFn={}, OnResetPresetFn resetFn={})
         : IControl(b, kNoParameter), mNames(names), mSelected(sel),
+          mTypeOf(std::move(typeOf)), mFilter(filter), mTypesVersion(typesVersion),
           mDropFn(std::move(dropFn)), mRemoveFn(std::move(removeFn)), mResetPresetFn(std::move(resetFn)) {}
 
+    // Redraw when the background analysis classifies more samples
+    bool IsDirty() override {
+        const int v = mTypesVersion.load();
+        if (v != mLastVersion) { mLastVersion = v; return true; }
+        return IControl::IsDirty();
+    }
+
     void Draw(IGraphics& g) override {
+        const std::vector<int> vis = visible();
         const float sbW=12.0f, rowH=UI::kRowH;
         IRECT listR(mRECT.L, mRECT.T, mRECT.R-sbW-1, mRECT.B);
         IRECT sbR  (mRECT.R-sbW, mRECT.T, mRECT.R, mRECT.B);
         g.FillRect(CT::bgPanel, listR);
 
-        int maxRows=(int)(listR.H()/rowH);
-        for (int i=mScroll; i<(int)mNames.size()&&(i-mScroll)<maxRows; i++) {
-            IRECT row(listR.L, listR.T+(i-mScroll)*rowH, listR.R, listR.T+(i-mScroll+1)*rowH);
-            bool sel=(i==mSelected);
+        const int maxRows=(int)(listR.H()/rowH);
+        mScroll = std::clamp(mScroll, 0, std::max(0, (int)vis.size()-maxRows));
+        for (int r=mScroll; r<(int)vis.size()&&(r-mScroll)<maxRows; r++) {
+            const int i = vis[r];
+            IRECT row(listR.L, listR.T+(r-mScroll)*rowH, listR.R, listR.T+(r-mScroll+1)*rowH);
+            const bool sel=(i==mSelected);
             if (sel) g.FillRect(CT::fgPrimary, row);
-            IText t(11.0f, sel?CT::textLight:CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
-            g.DrawText(t, mNames[i].c_str(), IRECT(row.L+6,row.T,row.R,row.B));
+            // Type badge on the right of the row
+            float nameR = row.R - 4;
+            const SoundType t = mTypeOf(i);
+            if (const char* b = SoundClassifier::badge(t)) {
+                const IRECT chip(row.R-38, row.MH()-6, row.R-4, row.MH()+6);
+                const IColor fill = t==SoundType::Bass ? CT::boxReverb : t==SoundType::LeadPad ? CT::boxDelay
+                                  : t==SoundType::Keys ? CT::boxDist : IColor(0,0,0,0);
+                if (fill.A) g.FillRoundRect(fill, chip, 3.0f);
+                IText bt(7.5f, t==SoundType::Pending ? (sel?CT::textLight:CT::textInk) : CT::textInk, "RobotoMono",
+                         EAlign::Center, EVAlign::Middle);
+                g.DrawText(bt, b, chip);
+                nameR = chip.L - 4;
+            }
+            IText tx(11.0f, sel?CT::textLight:CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
+            const IRECT nameRect(row.L+6, row.T, nameR, row.B);
+            g.PathClipRegion(nameRect);
+            g.DrawText(tx, mNames[i].c_str(), nameRect);
+            g.PathClipRegion();
         }
         g.FillRoundRect(IColor(255,120,118,114), sbR, 6.0f);
-        if (total()>maxRows) {
-            float thumbH=std::max(20.0f, sbR.H()*(float)maxRows/(float)total());
-            float maxSc=(float)(total()-maxRows);
+        if ((int)vis.size()>maxRows) {
+            float thumbH=std::max(20.0f, sbR.H()*(float)maxRows/(float)vis.size());
+            float maxSc=(float)(vis.size()-maxRows);
             float tp=(maxSc>0)?(float)mScroll/maxSc:0.0f;
             float ty=sbR.T+tp*(sbR.H()-thumbH);
             g.FillRoundRect(IColor(255,190,185,180), IRECT(sbR.L+2,ty,sbR.R-2,ty+thumbH), 5.0f);
         }
     }
     void OnMouseDown(float x, float y, const IMouseMod& mod) override {
+        const std::vector<int> vis = visible();
         const float sbW=12.0f, rowH=UI::kRowH;
-        int row=mScroll+(int)((y-mRECT.T)/rowH);
+        const int r=mScroll+(int)((y-mRECT.T)/rowH);
+        const int idx = (r>=0 && r<(int)vis.size()) ? vis[r] : -1;
         if (mod.R) {
-            if (row>=0&&row<total()) {
-                mContextRow=row;
+            if (idx>=0) {
+                mContextRow=idx;
                 mContextMenu = std::make_unique<IPopupMenu>();
                 mContextMenu->AddItem("Eliminar Sonido");
                 mContextMenu->AddItem("Eliminar Preset");
@@ -401,8 +436,8 @@ public:
             return;
         }
         if (x>=mRECT.R-sbW){mSbDrag=true;mSbY=y;return;}
-        if (row>=0&&row<total()){
-            mSelected=row;
+        if (idx>=0){
+            mSelected=idx;
             GetDelegate()->SendArbitraryMsgFromUI(kMsgLoadSample,kNoTag,sizeof(int),&mSelected);
             SetDirty(false);
         }
@@ -417,9 +452,10 @@ public:
     void OnMouseUp(float,float,const IMouseMod&) override {mSbDrag=false;}
     void OnMouseDrag(float,float y,float,float dy,const IMouseMod&) override {
         const float rowH=UI::kRowH;
-        int maxRows=(int)(mRECT.H()/rowH), maxSc=std::max(0,total()-maxRows);
+        const int total=(int)visible().size();
+        int maxRows=(int)(mRECT.H()/rowH), maxSc=std::max(0,total-maxRows);
         if (mSbDrag){
-            float thumbH=std::max(20.0f,mRECT.H()*(float)maxRows/std::max(1,total()));
+            float thumbH=std::max(20.0f,mRECT.H()*(float)maxRows/std::max(1,total));
             float range=mRECT.H()-thumbH;
             if(range>0) mScroll=std::clamp((int)(((y-mRECT.T)/range)*maxSc),0,maxSc);
         } else mScroll=std::clamp(mScroll+(int)(-dy/rowH),0,maxSc);
@@ -427,7 +463,8 @@ public:
     }
     void OnMouseWheel(float,float,const IMouseMod&,float d) override {
         const float rowH=UI::kRowH;
-        int maxRows=(int)(mRECT.H()/rowH),maxSc=std::max(0,total()-maxRows);
+        const int total=(int)visible().size();
+        int maxRows=(int)(mRECT.H()/rowH),maxSc=std::max(0,total-maxRows);
         mScroll=std::clamp(mScroll-(int)d,0,maxSc); SetDirty(false);
     }
     void refresh(){mScroll=0;SetDirty(false);}
@@ -435,14 +472,91 @@ public:
         if (mDropFn && str) { mScroll=0; mDropFn(std::string(str)); }
     }
 private:
-    int total() const {return (int)mNames.size();}
+    // Library indices shown with the current filter (0 = all, else a SoundType)
+    std::vector<int> visible() const {
+        std::vector<int> v;
+        for (int i=0; i<(int)mNames.size(); i++)
+            if (mFilter==0 || (int)mTypeOf(i)==mFilter) v.push_back(i);
+        return v;
+    }
     const std::vector<std::string>& mNames; int& mSelected;
+    TypeOfFn mTypeOf;
+    const int& mFilter;
+    const std::atomic<int>& mTypesVersion;
+    int mLastVersion{-1};
     OnDropFn        mDropFn;
     OnRemoveFn      mRemoveFn;
     OnResetPresetFn mResetPresetFn;
     std::unique_ptr<IPopupMenu> mContextMenu;
     int mContextRow{-1};
     int mScroll{0}; bool mSbDrag{false}; float mSbY{0};
+};
+
+// ─── Type filter under the library buttons: Todo · Bass · Lead / Pad · Keys ──
+class TypeFilterBar final : public IControl
+{
+public:
+    TypeFilterBar(const IRECT& b, int& filter, std::function<void()> onChange)
+        : IControl(b, kNoParameter), mFilter(filter), mOnChange(std::move(onChange)) {}
+    void Draw(IGraphics& g) override {
+        static const char* kLabels[4] = {"TODO", "BASS", "LEAD / PAD", "KEYS"};
+        static const int   kValues[4] = {0, (int)SoundType::Bass, (int)SoundType::LeadPad, (int)SoundType::Keys};
+        for (int i=0; i<4; i++) {
+            const IRECT r = cell(i);
+            const bool on = mFilter==kValues[i];
+            g.FillRoundRect(on ? CT::btnActive : CT::btnInactive, r, 2.0f);
+            IText t(8.0f, on ? CT::textLight : CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
+            g.DrawText(t, kLabels[i], r);
+        }
+    }
+    void OnMouseDown(float x, float y, const IMouseMod&) override {
+        static const int kValues[4] = {0, (int)SoundType::Bass, (int)SoundType::LeadPad, (int)SoundType::Keys};
+        for (int i=0; i<4; i++) if (cell(i).Contains(x, y)) { mFilter=kValues[i]; if (mOnChange) mOnChange(); SetDirty(false); return; }
+    }
+private:
+    // "LEAD / PAD" gets a wider cell than the others
+    IRECT cell(int i) const {
+        static const float w[4] = {0.22f, 0.22f, 0.34f, 0.22f};
+        float x = mRECT.L;
+        for (int k=0; k<i; k++) x += w[k]*mRECT.W();
+        return IRECT(x+1, mRECT.T, x+w[i]*mRECT.W()-1, mRECT.B);
+    }
+    int& mFilter;
+    std::function<void()> mOnChange;
+};
+
+// ─── Settings gear (left of the signature): loop + mono / poly ───────────────
+class SettingsGear final : public IControl
+{
+public:
+    using BuildFn  = std::function<void(IPopupMenu&)>;
+    using ChosenFn = std::function<void(int)>;
+    SettingsGear(const IRECT& b, BuildFn build, ChosenFn chosen)
+        : IControl(b, kNoParameter), mBuild(std::move(build)), mChosen(std::move(chosen)) {}
+    void Draw(IGraphics& g) override {
+        const float cx = mRECT.MW(), cy = mRECT.MH(), r = std::min(mRECT.W(), mRECT.H()) * 0.5f;
+        const IColor c = mMouseIsOver ? CT::fgPrimary : CT::textInk;
+        for (int i = 0; i < 8; i++) {   // teeth
+            const float a = i * 3.14159265f / 4.0f;
+            g.DrawLine(c, cx + std::cos(a)*r*0.55f, cy + std::sin(a)*r*0.55f, cx + std::cos(a)*r, cy + std::sin(a)*r, nullptr, 2.0f);
+        }
+        g.FillCircle(c, cx, cy, r*0.62f);
+        g.FillCircle(CT::bgPrimary, cx, cy, r*0.28f);
+    }
+    void OnMouseDown(float x, float y, const IMouseMod&) override {
+        mMenu = std::make_unique<IPopupMenu>();
+        if (mBuild) mBuild(*mMenu);
+        GetUI()->CreatePopupMenu(*this, *mMenu, IRECT(x, y, x+1, y+1));
+    }
+    void OnPopupMenuSelection(IPopupMenu* pMenu, int) override {
+        if (pMenu && mChosen) mChosen(pMenu->GetChosenItemIdx());
+        SetDirty(false);
+    }
+    void OnMouseOver(float, float, const IMouseMod&) override { mMouseIsOver = true; SetDirty(false); }
+    void OnMouseOut() override { mMouseIsOver = false; SetDirty(false); }
+private:
+    BuildFn mBuild; ChosenFn mChosen;
+    std::unique_ptr<IPopupMenu> mMenu;
 };
 
 // ─── Save icon button (floppy disk) with 2s confirmation tick ────────────────
@@ -878,6 +992,7 @@ class COMANCHE final : public Plugin
 {
 public:
     COMANCHE(const InstanceInfo& info);
+    ~COMANCHE() override;
 #if IPLUG_DSP
     void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
     void ProcessMidiMsg(const IMidiMsg& msg) override;
@@ -905,6 +1020,15 @@ public:
     void resetPresetForSample(int idx);
     // Reset button (X): all params back to their defaults, macro links cleared
     void resetPreset();
+
+    // ── Sound types (badges, filter, auto-loop) ──
+    SoundType soundTypeOf(int libraryIdx);
+    int  mTypeFilter{0};                 // 0 = all, else (int)SoundType
+    std::atomic<int> mTypesVersion{0};   // bumped when the background analysis classifies a sample
+    // Settings (gear): loop Bass / Lead-Pad while the key is held, mono or poly playback
+    std::atomic<bool> mLoopEnabled{true};
+    std::atomic<bool> mMono{false};
+    void setLoopEnabled(bool on);
     void savePersistentState() const;
     void loadPersistentState();
     // Set a param from plugin code on the UI thread: informs the host + syncs controls
@@ -925,6 +1049,20 @@ private:
     std::mutex   mSampleMutex;   // guards sample buffers (audio thread only try_locks)
     std::string  mSamplePath;    // loaded sample — saved with the project
     bool loadSampleData(const std::string& path);
+    // Crossfaded copy for looping + loop points; used when the loaded sample's type loops
+    std::vector<float> mLoopL, mLoopR;
+    int  mLoopStart{0}, mLoopEnd{0};
+    bool mHasLoop{false}, mLoopActive{false};
+    SoundType mSampleType{SoundType::Pending};
+    void updateLoopActive();   // call with mSampleMutex held
+
+    // Background classification of the library (name first, audio only when needed)
+    std::mutex mTypesMutex;
+    std::unordered_map<std::string, SoundType> mTypes;   // by sample path
+    std::thread mClassifyThread;
+    std::atomic<bool> mClassifyStop{false};
+    void startClassification();
+    void stopClassification();
     int    mSampleLen{0};
     double mSampleSR{44100.0};
     EffectsChain mFX;
