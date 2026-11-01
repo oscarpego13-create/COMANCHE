@@ -109,6 +109,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         ));
 
         // ── Header: signature top right, settings gear just left of it ───────────
+        SettingsPanel* settings = nullptr;
         {
             const IText sigText(8.0f, CT::textInk, "RobotoMono", EAlign::Far, EVAlign::Middle);
             const char* sig = "@laclave.pro v0.1.3";
@@ -116,21 +117,14 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             IRECT tb;
             const float tw = g->MeasureText(sigText, sig, tb);
             const float gx = W - 12.0f - tw - 8.0f, gs = 12.0f;
+            // Panel opens to the left of the gear (right edge just left of it) so it never leaves the window;
+            // attached last, after the layout, so it draws on top
+            settings = new SettingsPanel(IRECT(gx-gs-4-SettingsPanel::kW, 4, gx-gs-4, 4+SettingsPanel::kH), mMono,
+                [this] { return mLoopEnabled.load(); },
+                [this](bool on) { setLoopEnabled(on); },
+                [this] { markStateDirty(); });
             g->AttachControl(new SettingsGear(IRECT(gx-gs, hdrB*0.5f-gs*0.5f, gx, hdrB*0.5f+gs*0.5f),
-                [this](IPopupMenu& menu) {
-                    menu.AddItem("Loop en Bass y Lead / Pad (tocar sostenido)", -1,
-                                 mLoopEnabled ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
-                    menu.AddSeparator();
-                    menu.AddItem("Polifónico", -1, !mMono ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
-                    menu.AddItem("Monofónico", -1,  mMono ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
-                },
-                [this](int chosen) {
-                    if (chosen == 0) setLoopEnabled(!mLoopEnabled);
-                    else if (chosen == 2) mMono = false;
-                    else if (chosen == 3) mMono = true;
-                    else return;
-                    markStateDirty();
-                }));
+                [settings] { settings->Toggle(); }));
         }
 
         // ── Right side geometry ────────────────────────────────────────────────
@@ -231,6 +225,8 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             g->AttachControl(new ITextControl(IRECT(fX-2, boxOutput.T+3, fX+38, boxOutput.T+16), "FILTER",
                 IText(9.0f, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle)));
         }
+
+        g->AttachControl(settings);
     };
 #endif
 }

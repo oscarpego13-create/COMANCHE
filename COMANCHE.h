@@ -525,14 +525,74 @@ private:
     std::function<void()> mOnChange;
 };
 
-// ─── Settings gear (left of the signature): loop + mono / poly ───────────────
+// ─── Settings panel: loop + mono / poly, opens to the left of the gear ──────
+// Drawn by the plugin (not a native menu) so it stays inside the window and can carry a close X
+class SettingsPanel final : public IControl
+{
+public:
+    SettingsPanel(const IRECT& b, std::atomic<bool>& mono, std::function<bool()> loopOn,
+                  std::function<void(bool)> setLoop, std::function<void()> changed)
+        : IControl(b, kNoParameter), mMono(mono), mLoopOn(std::move(loopOn)),
+          mSetLoop(std::move(setLoop)), mChanged(std::move(changed)) { Hide(true); }
+    void Draw(IGraphics& g) override {
+        g.FillRoundRect(CT::bgPrimary, mRECT, 4.0f);
+        g.DrawRoundRect(CT::fgPrimary, mRECT, 4.0f, nullptr, 1.5f);
+        const IText title(9.0f, CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
+        g.DrawText(title, "AJUSTES", IRECT(mRECT.L+8, mRECT.T, mRECT.R, mRECT.T+kHead));
+        const IRECT x = closeRect();
+        const IColor xc = mOverClose ? CT::fgPrimary : CT::textInk;
+        g.DrawLine(xc, x.L+4, x.T+4, x.R-4, x.B-4, nullptr, 1.6f);
+        g.DrawLine(xc, x.R-4, x.T+4, x.L+4, x.B-4, nullptr, 1.6f);
+        g.DrawLine(CT::btnInactive, mRECT.L+6, mRECT.T+kHead, mRECT.R-6, mRECT.T+kHead, nullptr, 1.0f);
+        static const char* kLabels[3] = {"Loop en Bass y Lead / Pad", "Polifónico", "Monofónico"};
+        const bool on[3] = {mLoopOn(), !mMono, mMono};
+        const IText t(9.0f, CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
+        for (int i=0; i<3; i++) {
+            const IRECT r = row(i);
+            const IRECT box(r.L+8, r.MH()-5, r.L+18, r.MH()+5);
+            if (i==0) g.DrawRect(CT::fgPrimary, box, nullptr, 1.2f);      // checkbox
+            else g.DrawCircle(CT::fgPrimary, box.MW(), box.MH(), 5.0f, nullptr, 1.2f);   // radio
+            if (on[i]) { if (i==0) g.FillRect(CT::fgPrimary, box.GetPadded(-2.5f));
+                         else g.FillCircle(CT::fgPrimary, box.MW(), box.MH(), 2.5f); }
+            g.DrawText(t, kLabels[i], IRECT(box.R+6, r.T, r.R, r.B));
+        }
+    }
+    void OnMouseDown(float x, float y, const IMouseMod&) override {
+        if (closeRect().Contains(x, y)) { Hide(true); return; }
+        if      (row(0).Contains(x, y)) mSetLoop(!mLoopOn());
+        else if (row(1).Contains(x, y)) mMono = false;
+        else if (row(2).Contains(x, y)) mMono = true;
+        else return;
+        if (mChanged) mChanged();
+        SetDirty(false);
+    }
+    void OnMouseOver(float x, float y, const IMouseMod&) override {
+        const bool o = closeRect().Contains(x, y);
+        if (o != mOverClose) { mOverClose = o; SetDirty(false); }
+    }
+    void OnMouseOut() override { mOverClose = false; SetDirty(false); }
+    void Toggle() { Hide(!IsHidden()); }
+    static constexpr float kW = 196.0f, kHead = 20.0f, kRow = 19.0f, kH = kHead + 3*kRow + 10.0f;
+private:
+    IRECT closeRect() const { return IRECT(mRECT.R-18, mRECT.T+3, mRECT.R-4, mRECT.T+17); }
+    // Loop row, then a gap, then the two playback rows
+    IRECT row(int i) const {
+        const float t = mRECT.T + kHead + 3.0f + i*kRow + (i>0 ? 4.0f : 0.0f);
+        return IRECT(mRECT.L, t, mRECT.R, t+kRow);
+    }
+    std::atomic<bool>& mMono;
+    std::function<bool()> mLoopOn;
+    std::function<void(bool)> mSetLoop;
+    std::function<void()> mChanged;
+    bool mOverClose = false;
+};
+
+// ─── Settings gear (left of the signature): opens / closes the SettingsPanel ─
 class SettingsGear final : public IControl
 {
 public:
-    using BuildFn  = std::function<void(IPopupMenu&)>;
-    using ChosenFn = std::function<void(int)>;
-    SettingsGear(const IRECT& b, BuildFn build, ChosenFn chosen)
-        : IControl(b, kNoParameter), mBuild(std::move(build)), mChosen(std::move(chosen)) {}
+    SettingsGear(const IRECT& b, std::function<void()> onClick)
+        : IControl(b, kNoParameter), mOnClick(std::move(onClick)) {}
     void Draw(IGraphics& g) override {
         const float cx = mRECT.MW(), cy = mRECT.MH(), r = std::min(mRECT.W(), mRECT.H()) * 0.5f;
         const IColor c = mMouseIsOver ? CT::fgPrimary : CT::textInk;
@@ -543,20 +603,11 @@ public:
         g.FillCircle(c, cx, cy, r*0.62f);
         g.FillCircle(CT::bgPrimary, cx, cy, r*0.28f);
     }
-    void OnMouseDown(float x, float y, const IMouseMod&) override {
-        mMenu = std::make_unique<IPopupMenu>();
-        if (mBuild) mBuild(*mMenu);
-        GetUI()->CreatePopupMenu(*this, *mMenu, IRECT(x, y, x+1, y+1));
-    }
-    void OnPopupMenuSelection(IPopupMenu* pMenu, int) override {
-        if (pMenu && mChosen) mChosen(pMenu->GetChosenItemIdx());
-        SetDirty(false);
-    }
+    void OnMouseDown(float, float, const IMouseMod&) override { if (mOnClick) mOnClick(); }
     void OnMouseOver(float, float, const IMouseMod&) override { mMouseIsOver = true; SetDirty(false); }
     void OnMouseOut() override { mMouseIsOver = false; SetDirty(false); }
 private:
-    BuildFn mBuild; ChosenFn mChosen;
-    std::unique_ptr<IPopupMenu> mMenu;
+    std::function<void()> mOnClick;
 };
 
 // ─── Save icon button (floppy disk) with 2s confirmation tick ────────────────
