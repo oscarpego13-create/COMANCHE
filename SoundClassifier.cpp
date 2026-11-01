@@ -124,16 +124,12 @@ bool SoundClassifier::findLoop(const std::vector<float>& left, const std::vector
     if (peak < 1e-4f) return false;
     const int pk = (int)(pkIt - env.begin());
 
-    // End of the sustained part: last window still above 35 % of the peak (before the release tail)
+    // Loop from the middle of the sound to its end. The end is the last audible 10 ms window
+    // (above -50 dB from the peak), so trailing silence never gets looped.
     int last = (int)env.size() - 1;
-    while (last > pk && env[last] < 0.35f * peak) last--;
-    const int attackEnd = (pk + 5) * win;   // 50 ms after the peak
-    int end = last * win;
-    if (end - attackEnd < (int)(sr * 0.08)) return false;
-
-    // Loop the last part of the sustain: up to 500 ms, at most 60 % of it
-    const int len = (int)std::min(sr * 0.5, (end - attackEnd) * 0.6);
-    int start = end - len;
+    while (last > pk && env[last] < 0.003f * peak) last--;
+    int end = std::min((int)m.size(), (last + 1) * win);
+    int start = end / 2;
 
     // Snap both points to rising zero crossings (within ±5 ms) so the jump is continuous
     auto snap = [&](int p) {
@@ -146,7 +142,7 @@ bool SoundClassifier::findLoop(const std::vector<float>& left, const std::vector
     };
     start = snap(start);
     end = snap(end);
-    if (end - start < (int)(sr * 0.04) || start < (int)(sr * 0.03)) return false;
+    if (end - start < (int)(sr * 0.04)) return false;
     loopStart = start;
     loopEnd = end;
     return true;

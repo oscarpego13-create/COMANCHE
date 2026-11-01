@@ -554,7 +554,7 @@ bool COMANCHE::loadSampleData(const std::string& path)
     const bool hasLoop = SoundClassifier::findLoop(left, right, sr, ls, le);
     if (hasLoop) {
         loopL = left; loopR = right;
-        const int xf = std::min((int)(sr * 0.03), (le - ls) / 4);
+        const int xf = (int)((le - ls) * 0.15f);   // 15 % of the loop: its end fades into the audio before its start
         for (int i = 0; i < xf; i++) {
             const float f = (float)i / (float)xf;
             const int d = le - xf + i, s = ls - xf + i;

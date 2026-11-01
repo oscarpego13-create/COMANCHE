@@ -21,8 +21,8 @@ namespace SoundClassifier
     //  - Other:    too short / silent
     SoundType fromAudio(const std::vector<float>& left, const std::vector<float>& right, double sampleRate);
 
-    // Loop region at the end of the sustained part (before the release tail), snapped to
-    // rising zero crossings. Returns false when there is no usable sustain.
+    // Loop region from the middle of the sound to its audible end, snapped to rising zero
+    // crossings. Returns false when the sound is too short to loop.
     bool findLoop(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,
                   int& loopStart, int& loopEnd);
 
