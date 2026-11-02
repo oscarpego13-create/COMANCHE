@@ -124,28 +124,114 @@ bool SoundClassifier::findLoop(const std::vector<float>& left, const std::vector
     if (peak < 1e-4f) return false;
     const int pk = (int)(pkIt - env.begin());
 
-    // Loop from the middle of the sound to its end. The end is the last audible 10 ms window
-    // (above -50 dB from the peak), so trailing silence never gets looped.
+    // The sound ends at its last audible 10 ms window (-50 dB from the peak); the loop starts halfway
     int last = (int)env.size() - 1;
     while (last > pk && env[last] < 0.003f * peak) last--;
-    int end = std::min((int)m.size(), (last + 1) * win);
-    int start = end / 2;
+    const int startWin = std::max(pk + 1, last / 2);
+    if (startWin >= last) return false;
+    float startLevel = 0.0f;
+    for (int i = std::max(0, startWin - 1); i <= std::min(last, startWin + 1); i++) startLevel = std::max(startLevel, env[i]);
 
-    // Snap both points to rising zero crossings (within ±5 ms) so the jump is continuous
-    auto snap = [&](int p) {
-        const int r = (int)(sr * 0.005);
-        for (int d = 0; d <= r; d++) {
-            for (int s : {p + d, p - d})
-                if (s > 0 && s < (int)m.size() && m[s - 1] <= 0.0f && m[s] > 0.0f) return s;
+    // The loop ends before the release tail, while the sound is within -10 dB of its level at the
+    // loop start (buildLoop evens out that difference, so it never pumps).
+    auto lastAbove = [&](float k) { int e = last; while (e > startWin && env[e] < k * startLevel) e--; return e; };
+    int endWin = lastAbove(0.32f);
+    if ((endWin - startWin) * win < (int)(sr * 0.10)) endWin = lastAbove(0.16f);
+    const int start = startWin * win;
+    int end = (endWin + 1) * win;
+    if (end - start < (int)(sr * 0.06)) return false;
+
+    // Fine-tune the end so the audio before it lines up with the audio before the start (same phase):
+    // the crossfade then blends matching waveforms instead of cancelling.
+    const int xf = std::max(1, (int)((end - start) * kLoopCrossfade));
+    const int cmpLen = std::min(xf, (int)(sr * 0.05));
+    const int range = (int)(sr * 0.025);   // covers a full period down to 40 Hz
+    double best = -2.0; int bestEnd = end;
+    for (int e = end; e >= std::max(start + (int)(sr * 0.06), end - range); e--) {
+        if (start - cmpLen < 0 || e > (int)m.size()) continue;
+        double xy = 0, xx = 0, yy = 0;
+        for (int i = 1; i <= cmpLen; i += 2) {
+            const double x = m[e - i], y = m[start - i];
+            xy += x * y; xx += x * x; yy += y * y;
         }
-        return p;
-    };
-    start = snap(start);
-    end = snap(end);
-    if (end - start < (int)(sr * 0.04)) return false;
+        const double c = xy / std::sqrt(xx * yy + 1e-20);
+        if (c > best) { best = c; bestEnd = e; }
+    }
+    end = bestEnd;
+    if (start - (int)((end - start) * kLoopCrossfade) < 0) return false;
     loopStart = start;
     loopEnd = end;
     return true;
+}
+
+void SoundClassifier::buildLoop(const std::vector<float>& left, const std::vector<float>& right, double sr,
+                                int ls, int le, std::vector<float>& loopL, std::vector<float>& loopR)
+{
+    loopL = left; loopR = right;
+    const int xf = std::min(ls, (int)((le - ls) * kLoopCrossfade));
+    if (xf < 2) return;
+
+    // Even out the slow level changes inside the loop: most one-shots keep fading, so the end of the loop
+    // is quieter than its start and every pass would swell back up. The gain follows the sound's own
+    // envelope smoothed over ~100 ms (fast movement such as tremolo or detune beating is kept) and holds
+    // it at the level of the loop start.
+    {
+        const int n = (int)left.size(), half = std::max(1, std::min((le - ls) / 8, (int)(sr * 0.05)));
+        // The stretch before the loop start is what the loop end fades into, so it is levelled too,
+        // easing in over the same length before it so the first pass through stays smooth.
+        const int lead = std::min(xf, ls / 2), easeFrom = ls - 2 * lead;
+        const int from = std::max(0, easeFrom - half), to = std::min(n, le + half);
+        std::vector<double> pre(to - from + 1, 0.0);
+        for (int i = from; i < to; i++) {
+            const double v = right.empty() ? left[i] : 0.5 * (left[i] + right[i]);
+            pre[i - from + 1] = pre[i - from] + v * v;
+        }
+        auto envAt = [&](int i) {
+            const int a0 = std::max(from, i - half), a1 = std::min(to, i + half);
+            return std::sqrt((pre[a1 - from] - pre[a0 - from]) / std::max(1, a1 - a0));
+        };
+        const double target = envAt(ls);
+        if (target > 1e-6)
+            for (int i = std::max(0, easeFrom); i < le; i++) {
+                float g = (float)std::clamp(target / std::max(envAt(i), 1e-9), 0.25, 4.0);   // +-12 dB
+                if (i < ls - lead) {   // ease in: 0 -> full levelling
+                    const float w = (float)(i - easeFrom) / (float)std::max(1, lead);
+                    g = 1.0f + (0.5f - 0.5f * std::cos(3.14159265f * w)) * (g - 1.0f);
+                }
+                loopL[i] *= g;
+                if (!right.empty()) loopR[i] *= g;
+            }
+    }
+
+    // How alike the two crossfaded stretches are around each point (1 = same waveform, 0 = unrelated,
+    // < 0 = cancelling), over a sliding ~10 ms window. The phase between them can drift along the fade
+    // (detuned or glitchy sounds), so a single figure for the whole fade is not enough.
+    std::vector<double> sxy(xf + 1, 0.0), sxx(xf + 1, 0.0), syy(xf + 1, 0.0);
+    for (int i = 0; i < xf; i++) {
+        const double a = loopL[le - xf + i] + (right.empty() ? 0.0f : loopR[le - xf + i]);
+        const double b = loopL[ls - xf + i] + (right.empty() ? 0.0f : loopR[ls - xf + i]);
+        sxy[i + 1] = sxy[i] + a * b; sxx[i + 1] = sxx[i] + a * a; syy[i + 1] = syy[i] + b * b;
+    }
+    const int cw = std::max(1, (int)(sr * 0.005));
+    auto corrAt = [&](int i) {
+        const int a0 = std::max(0, i - cw), a1 = std::min(xf, i + cw);
+        const double xy = sxy[a1] - sxy[a0], xx = sxx[a1] - sxx[a0], yy = syy[a1] - syy[a0];
+        return std::clamp(xy / std::sqrt(xx * yy + 1e-20), -0.5, 1.0);
+    };
+
+    // S-shaped fade whose gains keep the power constant for that local correlation: no dip where the
+    // waveforms cancel and no bump where they add up. The loop end then lands exactly on the audio just
+    // before the loop start.
+    for (int i = 0; i < xf; i++) {
+        const float t = (float)(i + 1) / (float)xf;
+        const float sIn = 0.5f - 0.5f * std::cos(3.14159265f * t);
+        const float aOut = 1.0f - sIn, aIn = sIn;
+        const float c = (float)corrAt(i);
+        const float g = std::min(2.0f, 1.0f / std::sqrt(std::max(1e-4f, aOut * aOut + aIn * aIn + 2.0f * c * aOut * aIn)));
+        const int d = le - xf + i, s = ls - xf + i;
+        loopL[d] = (loopL[d] * aOut + loopL[s] * aIn) * g;
+        if (!right.empty()) loopR[d] = (loopR[d] * aOut + loopR[s] * aIn) * g;
+    }
 }
 
 const char* SoundClassifier::badge(SoundType t)

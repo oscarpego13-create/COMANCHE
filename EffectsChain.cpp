@@ -70,6 +70,8 @@ void EffectsChain::prepare(double sampleRate, int)
     filterSmoothCoeff = 1.0f - std::exp(-(float)kFilterSub / (float)(sr * 0.020)); // 20ms glide
     // Start at the current values so a reset doesn't sweep from the defaults
     mSmoothDistAmount=params.distAmount; mSmoothMacroMod=params.macroModAmount;
+    mSmoothVol=params.outputVol;
+    volSmoothCoeff = 1.0f - std::exp(-1.0f / (float)(sr * 0.015));   // 15 ms per-sample glide
     mSmoothHpFreq=params.hpFreq; mSmoothLpFreq=params.lpFreq;
     mSmoothDlcFreq=params.delayLowcut; mSmoothDhcFreq=params.delayHighcut;
     hpL.setCutoff(sr, mSmoothHpFreq);   hpR.setCutoff(sr, mSmoothHpFreq);
@@ -135,20 +137,26 @@ void EffectsChain::process(float* outL, float* outR, int n)
 
     // 2. Distortion + gain compensation + tape HF rolloff
     if (mSmoothDistAmount > 0.0001f) {
-        const float comp = 1.0f / (1.0f + mSmoothDistAmount * 4.0f);
+        // Knob response: the drive follows amount^2.2 and the saturated signal is blended in over the
+        // first 35 % of the knob, so low settings stay clean and the grit shows up around 30-40 %.
+        // At 100 % it is the same full drive as before.
+        const float amt   = std::pow(mSmoothDistAmount, 2.2f);
+        const float s     = std::min(1.0f, mSmoothDistAmount / 0.35f);
+        const float wet   = s * s * (3.0f - 2.0f * s);
+        const float comp  = 1.0f / (1.0f + amt * 4.0f);
         for (int i=0;i<n;i++) {
             float dL, dR;
             switch (params.distMode) {
-                case 1: dL=distTape(outL[i],mSmoothDistAmount); dR=distTape(outR[i],mSmoothDistAmount); break;
-                case 2: dL=distTube(outL[i],mSmoothDistAmount); dR=distTube(outR[i],mSmoothDistAmount); break;
-                default:dL=distClip(outL[i],mSmoothDistAmount); dR=distClip(outR[i],mSmoothDistAmount); break;
+                case 1: dL=distTape(outL[i],amt); dR=distTape(outR[i],amt); break;
+                case 2: dL=distTube(outL[i],amt); dR=distTube(outR[i],amt); break;
+                default:dL=distClip(outL[i],amt); dR=distClip(outR[i],amt); break;
             }
-            outL[i] = dL * comp;
-            outR[i] = dR * comp;
+            outL[i] += wet * (dL * comp - outL[i]);
+            outR[i] += wet * (dR * comp - outR[i]);
         }
         // TAPE: progressive HF loss (cutoff falls from 20kHz→3kHz as dist increases)
         if (params.distMode == 1) {
-            float fc = 20000.0f * std::pow(0.15f, mSmoothDistAmount);
+            float fc = 20000.0f * std::pow(0.15f, amt);
             fc = std::max(fc, 3000.0f);
             tapeHfL.setCutoff(sr, fc);
             tapeHfR.setCutoff(sr, fc);
@@ -232,7 +240,9 @@ void EffectsChain::process(float* outL, float* outR, int n)
     }
 
     // 5. Output HP + LP filters (cutoffs glide per sub-block)
-    const float vol = params.outputVol;
+    // The volume glides per sample: a value held per block steps at every block edge, which
+    // clicks when the fader is moved quickly.
+    const float volTarget = params.outputVol;
     for (int c0 = 0; c0 < n; c0 += kFilterSub) {
         const int c1 = std::min(n, c0 + kFilterSub);
         mSmoothHpFreq = smoothFreq(mSmoothHpFreq, params.hpFreq, filterSmoothCoeff);
@@ -240,8 +250,9 @@ void EffectsChain::process(float* outL, float* outR, int n)
         hpL.setCutoff(sr, mSmoothHpFreq); hpR.setCutoff(sr, mSmoothHpFreq);
         lpL.setCutoff(sr, mSmoothLpFreq); lpR.setCutoff(sr, mSmoothLpFreq);
         for (int i=c0;i<c1;i++) {
-            outL[i] = lpL.process(hpL.process(outL[i])) * vol;
-            outR[i] = lpR.process(hpR.process(outR[i])) * vol;
+            mSmoothVol += volSmoothCoeff * (volTarget - mSmoothVol);
+            outL[i] = lpL.process(hpL.process(outL[i])) * mSmoothVol;
+            outR[i] = lpR.process(hpR.process(outR[i])) * mSmoothVol;
         }
     }
 }

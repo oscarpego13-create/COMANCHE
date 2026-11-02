@@ -1,4 +1,5 @@
 #include "COMANCHE.h"
+#include "Trace.h"
 #include "IPlug_include_in_plug_src.h"
 #include "IControls.h"
 
@@ -24,6 +25,7 @@ static constexpr float kLfoFreq[kNumParams] = {
 COMANCHE::COMANCHE(const InstanceInfo& info)
   : Plugin(info, MakeConfig(kNumParams, 1))
 {
+    ctrace("---- COMANCHE ctor begin (instance %p)", (void*)this);
     GetParam(kReverbAmount) ->InitDouble("Reverb",      0.0,     0.0,   1.0,    0.001);
     GetParam(kReverbDecay)  ->InitDouble("ReverbDecay", 2.0,     0.3,   8.0,    0.01, "s");
     GetParam(kDistAmount)   ->InitDouble("Dist",        0.0,     0.0,   1.0,    0.001);
@@ -40,7 +42,9 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     GetParam(kOutputVol)    ->InitDouble("OutVol",      0.0,   -60.0,   6.0,    0.1, "dB");
     GetParam(kMacro)        ->InitDouble("Macro",       0.0,     0.0,   1.0,    0.001);
 
+    ctrace("ctor: params ready, loadPersistentState");
     loadPersistentState();
+    ctrace("ctor: loadPersistentState done (%d samples)", (int)mLibrary.getSamplePaths().size());
 
 #if IPLUG_EDITOR
     // Report the scaled window size from the start (same int maths as IGraphics::WindowWidth()).
@@ -49,6 +53,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     SetEditorSize(static_cast<int>(static_cast<float>(PLUG_WIDTH) * UI_SCALE),
                   static_cast<int>(static_cast<float>(PLUG_HEIGHT) * UI_SCALE));
     mMakeGraphicsFunc = [&]() {
+        ctrace("MakeGraphics");
         return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS,
                             GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT) * UI_SCALE);
     };
@@ -56,6 +61,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
     // Layout = the "Comanche UI Lab" design (v0.1.3): effects in one row, OUTPUT top-right,
     // MACRO next to OUTPUT, horse band behind the MACRO, full-height sound panel.
     mLayoutFunc = [&](IGraphics* g) {
+        ctrace("layout begin %dx%d scale %.2f", g->Width(), g->Height(), g->GetDrawScale());
         g->LoadFont("RobotoMono", ROBOTO_MONO_FN);
         g->EnableMouseOver(true);
         g->AttachPanelBackground(CT::bgPrimary);
@@ -151,7 +157,9 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         // Sprite cells were baked at 202x135 (horse scale 202/180), bottom-aligned in the band
         const float hx = hL + ((hR - hL) - HORSE_FRAME_W) * 0.5f;
         const IRECT horse(hx, band.B - 2.0f - HORSE_FRAME_H, hx + HORSE_FRAME_W, band.B - 2.0f);
+        ctrace("layout: loading horse bitmap");
         g->AttachControl(new HorseScene(band, horse, g->LoadBitmap(HORSE_FN)));
+        ctrace("layout: horse ok");
 
         // COMANCHE logo centred over the horse (artwork from the pack cover)
         {
@@ -183,7 +191,10 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 
         auto addKnob = [&](float x, float y, int param, const char* lbl, IColor fill) {
             const IRECT r(x, y, x+kw, y+kh);
-            g->AttachControl(new ComanacheKnob(r, param, lbl, fill, false, &mMacroLink[param], mParamMod));
+            // A label sits below the value, past the knob's own area: grow the control so it isn't clipped
+            const float labelBottom = 4.0f + 0.7f*kw + UI::kLabelGap + 14.0f;
+            const IRECT drawR = (lbl && lbl[0]) ? IRECT(r.L, r.T, r.R, r.T + std::max(kh, labelBottom)) : r;
+            g->AttachControl(new ComanacheKnob(drawR, param, lbl, fill, false, &mMacroLink[param], mParamMod));
             g->AttachControl(new MacroLinkButton(IRECT(r.R-10, r.T, r.R, r.T+10), mMacroLink[param],
                                                  [this]() { markStateDirty(); }));
         };
@@ -232,6 +243,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         }
 
         g->AttachControl(settings);
+        ctrace("layout end (%d controls)", g->NControls());
     };
 #endif
 }
@@ -242,6 +254,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 
 void COMANCHE::OnReset()
 {
+    ctrace("OnReset sr=%.0f block=%d", GetSampleRate(), GetBlockSize());
     mFX.prepare(GetSampleRate(), GetBlockSize());
     for (auto& v : mVoices) v = Voice{};
     mVoiceTimer = 0;
@@ -254,6 +267,7 @@ void COMANCHE::ProcessMidiMsg(const IMidiMsg& msg)
 
 void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
 {
+    if (mTraceBlocks < 3) { mTraceBlocks++; ctrace("ProcessBlock #%d nFrames=%d sr=%.0f", mTraceBlocks, nFrames, GetSampleRate()); }
     const int n = std::min(nFrames, kMaxBlock);
 
     std::fill(mTmpL, mTmpL+n, 0.0f);
@@ -290,8 +304,9 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
                     env *= v.relLeft / v.relTotal;
                     v.relLeft -= 1.0f;
                 }
-                mTmpL[s] += lerp(srcL, v.srcPos) * env;
-                mTmpR[s] += lerp(srcR, v.srcPos) * env;
+                const int wrapAt = mLoopActive ? mLoopEnd : -1;
+                mTmpL[s] += lerp(srcL, v.srcPos, wrapAt, mLoopStart) * env;
+                mTmpR[s] += lerp(srcR, v.srcPos, wrapAt, mLoopStart) * env;
                 v.srcPos  += v.pitchRatio;
             }
         }
@@ -369,12 +384,15 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
 
 // ─── Voice management ────────────────────────────────────────────────────────
 
-float COMANCHE::lerp(const std::vector<float>& b, double pos)
+// Inside a loop the sample after the last one is the loop start, not what follows the loop end
+float COMANCHE::lerp(const std::vector<float>& b, double pos, int loopEnd, int loopStart)
 {
     int i = (int)pos;
     float f = (float)(pos - i);
-    float s0 = (i   < (int)b.size()) ? b[i]   : 0.0f;
-    float s1 = (i+1 < (int)b.size()) ? b[i+1] : 0.0f;
+    int j = i + 1;
+    if (loopEnd > 0 && j >= loopEnd) j = loopStart + (j - loopEnd);
+    float s0 = (i < (int)b.size()) ? b[i] : 0.0f;
+    float s1 = (j < (int)b.size()) ? b[j] : 0.0f;
     return s0 + f*(s1-s0);
 }
 
@@ -432,6 +450,7 @@ static constexpr int kSerializeMagic   = 0x434F4D33; // 'COM3'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
+    ctrace("SerializeState");
     chunk.Put(&kSerializeMagic);
     WDL_String folder(mFolderPath.c_str());
     chunk.PutStr(folder.Get());
@@ -446,6 +465,7 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
 
 int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
 {
+    ctrace("UnserializeState size=%d pos=%d", chunk.Size(), pos);
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
@@ -495,6 +515,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mFolderPath.empty()) { mLibrary.setFolder(mFolderPath); startClassification(); }
     }
 
+    ctrace("UnserializeState: params at %d", pos);
     return UnserializeParams(chunk, pos);
 }
 
@@ -506,6 +527,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
 
 void COMANCHE::OnUIOpen()
 {
+    ctrace("OnUIOpen");
     // Sync control values with params — controls cache their value for drag start
     SendCurrentParamValuesFromDelegate();
     if (GetUI()) GetUI()->SetAllControlsDirty();
@@ -513,6 +535,7 @@ void COMANCHE::OnUIOpen()
 
 void COMANCHE::OnRestoreState()
 {
+    ctrace("OnRestoreState");
     Plugin::OnRestoreState();
     // Sample list + macro links aren't params, redraw them too
     if (GetUI()) GetUI()->SetAllControlsDirty();
@@ -534,6 +557,7 @@ bool COMANCHE::OnMessage(int msgTag, int, int /*dataSize*/, const void* pData)
 
 bool COMANCHE::loadSampleData(const std::string& path)
 {
+    ctrace("loadSampleData %s", path.c_str());
     std::vector<float> left, right;
     int numCh; double sr;
     if (!mLibrary.loadSample(path, left, right, numCh, sr)) return false;
@@ -552,21 +576,12 @@ bool COMANCHE::loadSampleData(const std::string& path)
         mTypes[path] = type;
         mTypesVersion++;
     }
-    // Loop copy: the end of the loop region is crossfaded with the audio just before its start,
-    // so jumping from loopEnd back to loopStart is seamless
+    // Loop copy: level evened out inside the loop and its end crossfaded into the audio just before
+    // its start, so jumping from loopEnd back to loopStart is seamless
     int ls = 0, le = 0;
     std::vector<float> loopL, loopR;
     const bool hasLoop = SoundClassifier::findLoop(left, right, sr, ls, le);
-    if (hasLoop) {
-        loopL = left; loopR = right;
-        const int xf = (int)((le - ls) * 0.15f);   // 15 % of the loop: its end fades into the audio before its start
-        for (int i = 0; i < xf; i++) {
-            const float f = (float)i / (float)xf;
-            const int d = le - xf + i, s = ls - xf + i;
-            loopL[d] = left[d] * (1.0f - f) + left[s] * f;
-            if (!right.empty()) loopR[d] = right[d] * (1.0f - f) + right[s] * f;
-        }
-    }
+    if (hasLoop) SoundClassifier::buildLoop(left, right, sr, ls, le, loopL, loopR);
 
     std::lock_guard<std::mutex> lock(mSampleMutex);
     mSampleL   = std::move(left);
@@ -623,11 +638,13 @@ void COMANCHE::startClassification()
         }
     }
     mTypesVersion++;
+    ctrace("startClassification: %d by name, %d to analyse", (int)mLibrary.getSamplePaths().size() - (int)todo.size(), (int)todo.size());
     if (todo.empty()) return;
     mClassifyStop = false;
     mClassifyThread = std::thread([this, todo = std::move(todo)]() {
         for (const auto& p : todo) {
-            if (mClassifyStop) return;
+            if (mClassifyStop) { ctrace("classify thread: stopped"); return; }
+            ctrace("classify: %s", p.c_str());
             std::vector<float> l, r; int ch = 0; double sr = 0;
             const SoundType t = mLibrary.loadSample(p, l, r, ch, sr) ? SoundClassifier::fromAudio(l, r, sr)
                                                                       : SoundType::Other;
@@ -648,6 +665,7 @@ void COMANCHE::stopClassification()
 
 COMANCHE::~COMANCHE()
 {
+    ctrace("---- COMANCHE dtor (instance %p)", (void*)this);
     stopClassification();
 }
 
@@ -767,6 +785,7 @@ void COMANCHE::savePersistentState() const
 
 void COMANCHE::loadPersistentState()
 {
+    ctrace("loadPersistentState");
     std::string p = persistStatePath();
     if (p.empty()) return;
     std::ifstream f(p);

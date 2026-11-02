@@ -63,3 +63,6 @@
 #define HORSE_FRAME_W 202.0f
 #define HORSE_FRAME_H 135.0f
 #define TITLE_FN "comanche-title.png"
+
+// Diagnostic breadcrumbs to ~/Library/Application Support/COMANCHE/trace.log (Trace.h)
+#define COMANCHE_TRACE 0

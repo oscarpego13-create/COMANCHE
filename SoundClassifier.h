@@ -21,10 +21,18 @@ namespace SoundClassifier
     //  - Other:    too short / silent
     SoundType fromAudio(const std::vector<float>& left, const std::vector<float>& right, double sampleRate);
 
-    // Loop region from the middle of the sound to its audible end, snapped to rising zero
-    // crossings. Returns false when the sound is too short to loop.
+    // Share of the loop length crossfaded from its end into the audio before its start
+    constexpr float kLoopCrossfade = 0.15f;
+
+    // Loop region from the middle of the sound to the end of its sustained part (before the release
+    // tail), with the end phase-aligned to the start. Returns false when the sound is too short to loop.
     bool findLoop(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,
                   int& loopStart, int& loopEnd);
+
+    // Copy of the sample whose last kLoopCrossfade of the loop fades into the audio before loopStart,
+    // with a constant-power S-curve, so jumping from loopEnd back to loopStart is seamless.
+    void buildLoop(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,
+                   int loopStart, int loopEnd, std::vector<float>& loopL, std::vector<float>& loopR);
 
     // True for the types that loop while the key is held
     inline bool loops(SoundType t) { return t == SoundType::Bass || t == SoundType::LeadPad; }

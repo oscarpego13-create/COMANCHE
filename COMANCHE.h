@@ -3,6 +3,7 @@
 #include "IPlug_include_in_plug_hdr.h"
 #include "IControls.h"
 #include "IPlugMidi.h"
+#include "Trace.h"
 
 #include <vector>
 #include <string>
@@ -1044,6 +1045,24 @@ class COMANCHE final : public Plugin
 public:
     COMANCHE(const InstanceInfo& info);
     ~COMANCHE() override;
+#if COMANCHE_TRACE && defined VST3_API
+    // Diagnostic: log every host call before passing it to iPlug2
+    using tresult = Steinberg::tresult;
+    tresult PLUGIN_API initialize(Steinberg::FUnknown* c) override { ctrace("VST3 initialize"); auto r = Plugin::initialize(c); ctrace("VST3 initialize -> %d", (int)r); return r; }
+    tresult PLUGIN_API terminate() override { ctrace("VST3 terminate"); return Plugin::terminate(); }
+    tresult PLUGIN_API setBusArrangements(Steinberg::Vst::SpeakerArrangement* i, Steinberg::int32 ni, Steinberg::Vst::SpeakerArrangement* o, Steinberg::int32 no) override
+        { ctrace("VST3 setBusArrangements ins=%d outs=%d", (int)ni, (int)no); auto r = Plugin::setBusArrangements(i, ni, o, no); ctrace("VST3 setBusArrangements -> %d", (int)r); return r; }
+    tresult PLUGIN_API setActive(Steinberg::TBool s) override { ctrace("VST3 setActive %d", (int)s); auto r = Plugin::setActive(s); ctrace("VST3 setActive -> %d", (int)r); return r; }
+    tresult PLUGIN_API setupProcessing(Steinberg::Vst::ProcessSetup& s) override
+        { ctrace("VST3 setupProcessing sr=%.0f maxBlock=%d mode=%d size=%d", s.sampleRate, (int)s.maxSamplesPerBlock, (int)s.processMode, (int)s.symbolicSampleSize); auto r = Plugin::setupProcessing(s); ctrace("VST3 setupProcessing -> %d", (int)r); return r; }
+    tresult PLUGIN_API setProcessing(Steinberg::TBool s) override { ctrace("VST3 setProcessing %d", (int)s); return Plugin::setProcessing(s); }
+    tresult PLUGIN_API setState(Steinberg::IBStream* s) override { ctrace("VST3 setState"); auto r = Plugin::setState(s); ctrace("VST3 setState -> %d", (int)r); return r; }
+    tresult PLUGIN_API getState(Steinberg::IBStream* s) override { ctrace("VST3 getState"); auto r = Plugin::getState(s); ctrace("VST3 getState -> %d", (int)r); return r; }
+    tresult PLUGIN_API setComponentState(Steinberg::IBStream* s) override { ctrace("VST3 setComponentState"); return Plugin::setComponentState(s); }
+    Steinberg::IPlugView* PLUGIN_API createView(const char* n) override { ctrace("VST3 createView %s", n ? n : "(null)"); auto v = Plugin::createView(n); ctrace("VST3 createView -> %p", (void*)v); return v; }
+    tresult PLUGIN_API setEditorState(Steinberg::IBStream* s) override { ctrace("VST3 setEditorState"); return Plugin::setEditorState(s); }
+    tresult PLUGIN_API getEditorState(Steinberg::IBStream* s) override { ctrace("VST3 getEditorState"); return Plugin::getEditorState(s); }
+#endif
 #if IPLUG_DSP
     void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
     void ProcessMidiMsg(const IMidiMsg& msg) override;
@@ -1086,6 +1105,7 @@ public:
     void setParamFromUI(int idx, double normalized);
     // Tell the host that non-param state (sample, macro links, folder) changed
     void markStateDirty();
+    int  mTraceBlocks = 0;   // diagnostic: log the first audio blocks
 private:
     struct Voice {
         bool   active{false},inRelease{false};
@@ -1124,5 +1144,5 @@ private:
     void noteOn(int note,float vel);
     void noteOff(int note);
     int  stealVoice();
-    static float lerp(const std::vector<float>& b,double pos);
+    static float lerp(const std::vector<float>& b, double pos, int loopEnd = -1, int loopStart = 0);
 };

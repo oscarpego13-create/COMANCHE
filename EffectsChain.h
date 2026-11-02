@@ -139,6 +139,8 @@ private:
 
     // Parameter smoothers — prevent zipper noise on rapid knob changes
     float mSmoothDistAmount{0.0f};
+    float mSmoothVol{1.0f};          // output gain, glided per sample
+    float volSmoothCoeff{0.0f};
     float mSmoothHpFreq{20.0f};
     float mSmoothLpFreq{20000.0f};
     float mSmoothDlcFreq{20.0f};
