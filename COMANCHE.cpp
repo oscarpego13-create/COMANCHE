@@ -130,7 +130,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             const float gx = W - 12.0f - tw - 8.0f, gs = 12.0f;
             // Panel opens to the left of the gear (right edge just left of it) so it never leaves the window;
             // attached last, after the layout, so it draws on top
-            settings = new SettingsPanel(IRECT(gx-gs-4-SettingsPanel::kW, 4, gx-gs-4, 4+SettingsPanel::kH), mMono, mGlideMs,
+            settings = new SettingsPanel(IRECT(gx-gs-4-SettingsPanel::kW, 4, gx-gs-4, 4+SettingsPanel::kH), mMono, mGlideMs, mVelDynamics,
                 [this] { return mLoopEnabled.load(); },
                 [this](bool on) { setLoopEnabled(on); },
                 [this] { markStateDirty(); });
@@ -458,7 +458,8 @@ void COMANCHE::noteOn(int note, float vel)
     v.semis      = v.targetSemis = note - 60;
     v.glideStep  = 0.0;
     v.pitchRatio = ratioFor(v.semis);
-    v.level      = vel;
+    // Velocity -> dynamics: at 100 % the key velocity sets the level, at 0 % every note plays at full level
+    v.level      = 1.0f - mVelDynamics.load() * (1.0f - vel);
     v.startSample= mVoiceTimer;
     v.relTotal   = 0.08f * (float)GetSampleRate();
     v.relLeft    = 0.0f;
@@ -483,13 +484,15 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
-// Format v4: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [params]
+// Format v5: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)] [params]
+// Format v4: same without velDynamics
 // Format v3: same without glide
 // Format v2: same without loop/mono
 // Format v1 (old, broken): [folder(str)] [params]  — sample was never saved
 static constexpr int kSerializeMagicV2 = 0x434F4D32; // 'COM2'
 static constexpr int kSerializeMagicV3 = 0x434F4D33; // 'COM3'
-static constexpr int kSerializeMagic   = 0x434F4D34; // 'COM4'
+static constexpr int kSerializeMagicV4 = 0x434F4D34; // 'COM4'
+static constexpr int kSerializeMagic   = 0x434F4D35; // 'COM5'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
@@ -503,8 +506,9 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     const int loop = mLoopEnabled ? 1 : 0, mono = mMono ? 1 : 0;
     chunk.Put(&loop);
     chunk.Put(&mono);
-    const float glide = mGlideMs.load();
+    const float glide = mGlideMs.load(), dyn = mVelDynamics.load();
     chunk.Put(&glide);
+    chunk.Put(&dyn);
     return SerializeParams(chunk);
 }
 
@@ -514,7 +518,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
-    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
+    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
         // v2 / v3: full restore
         pos = afterMagic;
         WDL_String folder;
@@ -543,17 +547,22 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
-        if (magic == kSerializeMagic || magic == kSerializeMagicV3) {
+        if (magic == kSerializeMagic || magic == kSerializeMagicV4 || magic == kSerializeMagicV3) {
             int loop = 1, mono = 0;
             pos = chunk.Get(&loop, pos);
             pos = chunk.Get(&mono, pos);
             mMono = mono != 0;
             setLoopEnabled(loop != 0);
         }
-        if (magic == kSerializeMagic) {
+        if (magic == kSerializeMagic || magic == kSerializeMagicV4) {
             float glide = 80.0f;
             pos = chunk.Get(&glide, pos);
             mGlideMs = std::clamp(glide, 0.0f, SettingsPanel::kGlideMaxMs);
+        }
+        if (magic == kSerializeMagic) {
+            float dyn = 1.0f;
+            pos = chunk.Get(&dyn, pos);
+            mVelDynamics = std::clamp(dyn, 0.0f, 1.0f);
         }
     } else {
         // v1 (old saves): folder + params only, no sample
