@@ -601,7 +601,7 @@ bool COMANCHE::loadSampleData(const std::string& path)
 
 void COMANCHE::updateLoopActive()
 {
-    mLoopActive = mHasLoop && mLoopEnabled && SoundClassifier::loops(mSampleType)
+    mLoopActive = mHasLoop && mLoopEnabled
                && mLoopL.size() == mSampleL.size() && mLoopEnd <= mSampleLen;
 }
 
@@ -693,6 +693,10 @@ void COMANCHE::loadSample(int idx)
     }
     for (int pi = 0; pi < kNumParams; pi++)
         setParamFromUI(pi, norm[pi]);
+    // Loop: on by default for Bass and Lead / Pad, off for the rest, unless this sound's preset says otherwise
+    const auto& saved = mPresets.getValues();
+    const auto loopIt = saved.find(kPresetLoopKey);
+    setLoopEnabled(loopIt != saved.end() ? loopIt->second > 0.5f : SoundClassifier::loops(mSampleType));
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
@@ -704,6 +708,7 @@ void COMANCHE::savePreset()
         auto* p = GetParam(i);
         vals[p->GetName()] = (float)p->Value();
     }
+    vals[kPresetLoopKey] = mLoopEnabled ? 1.0f : 0.0f;
     mPresets.save(vals);
 }
 
@@ -726,6 +731,7 @@ void COMANCHE::resetPresetForSample(int idx)
     if (idx == mSelectedIdx) {
         for (int pi = 0; pi < kNumParams; pi++)
             setParamFromUI(pi, GetParam(pi)->GetDefault(true));
+        setLoopEnabled(SoundClassifier::loops(mSampleType));
         if (GetUI()) GetUI()->SetAllControlsDirty();
     }
 }
@@ -735,6 +741,7 @@ void COMANCHE::resetPreset()
     for (int pi = 0; pi < kNumParams; pi++)
         setParamFromUI(pi, GetParam(pi)->GetDefault(true));
     for (int pi = 0; pi < kNumParams; pi++) mMacroLink[pi] = 0;
+    setLoopEnabled(SoundClassifier::loops(mSampleType));
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }

@@ -34,7 +34,7 @@ namespace SoundClassifier
     void buildLoop(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,
                    int loopStart, int loopEnd, std::vector<float>& loopL, std::vector<float>& loopR);
 
-    // True for the types that loop while the key is held
+    // Types whose loop is on by default when the sound is loaded (any sound can loop if switched on)
     inline bool loops(SoundType t) { return t == SoundType::Bass || t == SoundType::LeadPad; }
 
     const char* badge(SoundType t);   // "BASS", "LEAD", "KEYS", "···" (pending) or nullptr

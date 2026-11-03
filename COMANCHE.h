@@ -545,7 +545,7 @@ public:
         g.DrawLine(xc, x.L+4, x.T+4, x.R-4, x.B-4, nullptr, 1.6f);
         g.DrawLine(xc, x.R-4, x.T+4, x.L+4, x.B-4, nullptr, 1.6f);
         g.DrawLine(CT::btnInactive, mRECT.L+6, mRECT.T+kHead, mRECT.R-6, mRECT.T+kHead, nullptr, 1.0f);
-        static const char* kLabels[3] = {"Loop en Bass y Lead / Pad", "Polifónico", "Monofónico"};
+        static const char* kLabels[3] = {"Loop (mantener nota)", "Polifónico", "Monofónico"};
         const bool on[3] = {mLoopOn(), !mMono, mMono};
         const IText t(9.0f, CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
         for (int i=0; i<3; i++) {
@@ -1096,7 +1096,8 @@ public:
     int  mTypeFilter{0};                 // 0 = all, else (int)SoundType
     std::atomic<int> mTypesVersion{0};   // bumped when the background analysis classifies a sample
     // Settings (gear): loop Bass / Lead-Pad while the key is held, mono or poly playback
-    std::atomic<bool> mLoopEnabled{true};
+    std::atomic<bool> mLoopEnabled{true};   // set per sound on load: on for Bass / Lead-Pad, off otherwise
+    static constexpr const char* kPresetLoopKey = "Loop";   // per-sound preset entry for the loop switch
     std::atomic<bool> mMono{false};
     void setLoopEnabled(bool on);
     void savePersistentState() const;

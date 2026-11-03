@@ -122,12 +122,14 @@ bool SoundClassifier::findLoop(const std::vector<float>& left, const std::vector
     const auto pkIt = std::max_element(env.begin(), env.end());
     const float peak = *pkIt;
     if (peak < 1e-4f) return false;
-    const int pk = (int)(pkIt - env.begin());
 
-    // The sound ends at its last audible 10 ms window (-50 dB from the peak); the loop starts halfway
+    // The sound ends at its last audible 10 ms window (-50 dB from the peak), less 30 ms so a final cut or
+    // click stays out of the loop; the loop starts halfway. The peak can be anywhere (swells, risers, organs
+    // that end on their loudest chord), so it is not used as a lower bound.
     int last = (int)env.size() - 1;
-    while (last > pk && env[last] < 0.003f * peak) last--;
-    const int startWin = std::max(pk + 1, last / 2);
+    while (last > 0 && env[last] < 0.003f * peak) last--;
+    last = std::max(0, last - 3);
+    const int startWin = std::max(1, last / 2);
     if (startWin >= last) return false;
     float startLevel = 0.0f;
     for (int i = std::max(0, startWin - 1); i <= std::min(last, startWin + 1); i++) startLevel = std::max(startLevel, env[i]);
