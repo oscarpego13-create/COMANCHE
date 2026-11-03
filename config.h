@@ -2,8 +2,8 @@
 
 #define PLUG_NAME "COMANCHE"
 #define PLUG_MFR  "AudioDev"
-#define PLUG_VERSION_HEX 0x00010000
-#define PLUG_VERSION_STR "1.0.0"
+#define PLUG_VERSION_HEX 0x00000104
+#define PLUG_VERSION_STR "0.1.4"
 #define PLUG_UNIQUE_ID 'Cmch'
 #define PLUG_MFR_ID    'AuDv'
 #define PLUG_URL_STR   ""

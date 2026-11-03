@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(COMANCHE VERSION 1.0.0)
+project(COMANCHE VERSION 0.1.4)
 
 if(NOT DEFINED IPLUG2_DIR)
   set(IPLUG2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../iPlug2" CACHE PATH "iPlug2 root directory")
@@ -54,9 +54,9 @@ if(APPLE AND TARGET ${PROJECT_NAME}-vst3)
   add_custom_command(TARGET ${PROJECT_NAME}-vst3 POST_BUILD
     COMMAND plutil -replace CFBundleExecutable -string "${PROJECT_NAME}" "${_plist}"
     COMMAND plutil -replace CFBundleName -string "${PROJECT_NAME}" "${_plist}"
-    COMMAND plutil -replace CFBundleShortVersionString -string "1.0.0" "${_plist}"
-    COMMAND plutil -replace CFBundleVersion -string "1.0.0" "${_plist}"
-    COMMAND plutil -replace CFBundleGetInfoString -string "1.0.0, AudioDev" "${_plist}"
+    COMMAND plutil -replace CFBundleShortVersionString -string "${PROJECT_VERSION}" "${_plist}"
+    COMMAND plutil -replace CFBundleVersion -string "${PROJECT_VERSION}" "${_plist}"
+    COMMAND plutil -replace CFBundleGetInfoString -string "${PROJECT_VERSION}, AudioDev" "${_plist}"
     COMMAND plutil -replace CFBundleSupportedPlatforms -json "[\"MacOSX\"]" "${_plist}"
     COMMAND plutil -replace LSMinimumSystemVersion -string "10.15" "${_plist}"
     COMMAND plutil -remove CFBundleIconFile "${_plist}" || true
