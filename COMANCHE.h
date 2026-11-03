@@ -531,9 +531,9 @@ private:
 class SettingsPanel final : public IControl
 {
 public:
-    SettingsPanel(const IRECT& b, std::atomic<bool>& mono, std::function<bool()> loopOn,
+    SettingsPanel(const IRECT& b, std::atomic<bool>& mono, std::atomic<float>& glideMs, std::function<bool()> loopOn,
                   std::function<void(bool)> setLoop, std::function<void()> changed)
-        : IControl(b, kNoParameter), mMono(mono), mLoopOn(std::move(loopOn)),
+        : IControl(b, kNoParameter), mMono(mono), mGlideMs(glideMs), mLoopOn(std::move(loopOn)),
           mSetLoop(std::move(setLoop)), mChanged(std::move(changed)) { Hide(true); }
     void Draw(IGraphics& g) override {
         g.FillRoundRect(CT::bgPrimary, mRECT, 4.0f);
@@ -557,9 +557,25 @@ public:
                          else g.FillCircle(CT::fgPrimary, box.MW(), box.MH(), 2.5f); }
             g.DrawText(t, kLabels[i], IRECT(box.R+6, r.T, r.R, r.B));
         }
+
+        // Glide: label + value, then a bar to drag. Dimmed while it can't act (needs mono and loop).
+        const IRECT gr = glideRow();
+        const bool live = mMono && mLoopOn();
+        const IColor ink = live ? CT::textInk : CT::btnInactive;
+        g.DrawLine(CT::btnInactive, mRECT.L+6, gr.T-3, mRECT.R-6, gr.T-3, nullptr, 1.0f);
+        const IText gl(9.0f, ink, "RobotoMono", EAlign::Near, EVAlign::Middle);
+        const IText gv(9.0f, ink, "RobotoMono", EAlign::Far, EVAlign::Middle);
+        g.DrawText(gl, live ? "Glide" : "Glide (mono + loop)", IRECT(gr.L+8, gr.T, gr.R-8, gr.T+14));
+        WDL_String ms; ms.SetFormatted(16, "%d ms", (int)std::lround(mGlideMs.load()));
+        g.DrawText(gv, ms.Get(), IRECT(gr.L+8, gr.T, gr.R-8, gr.T+14));
+        const IRECT bar = glideBar();
+        g.FillRoundRect(CT::btnInactive, bar, 3.0f);
+        const float n = std::sqrt(std::clamp(mGlideMs.load() / kGlideMaxMs, 0.0f, 1.0f));
+        if (n > 0.0f) g.FillRoundRect(live ? CT::fgPrimary : CT::textInk.WithOpacity(0.35f), IRECT(bar.L, bar.T, bar.L + n*bar.W(), bar.B), 3.0f);
     }
     void OnMouseDown(float x, float y, const IMouseMod&) override {
         if (closeRect().Contains(x, y)) { Hide(true); return; }
+        if (glideRow().Contains(x, y)) { mDragGlide = true; setGlideFromX(x); return; }
         if      (row(0).Contains(x, y)) mSetLoop(!mLoopOn());
         else if (row(1).Contains(x, y)) mMono = false;
         else if (row(2).Contains(x, y)) mMono = true;
@@ -572,8 +588,14 @@ public:
         if (o != mOverClose) { mOverClose = o; SetDirty(false); }
     }
     void OnMouseOut() override { mOverClose = false; SetDirty(false); }
+    void OnMouseDrag(float x, float, float, float, const IMouseMod&) override { if (mDragGlide) setGlideFromX(x); }
+    void OnMouseUp(float, float, const IMouseMod&) override {
+        if (mDragGlide) { mDragGlide = false; if (mChanged) mChanged(); }
+    }
     void Toggle() { Hide(!IsHidden()); }
-    static constexpr float kW = 196.0f, kHead = 20.0f, kRow = 19.0f, kH = kHead + 3*kRow + 10.0f;
+    static constexpr float kGlideMaxMs = 1000.0f;
+    static constexpr float kW = 196.0f, kHead = 20.0f, kRow = 19.0f, kGlideH = 30.0f;
+    static constexpr float kH = kHead + 3.0f + 3*kRow + 4.0f + 7.0f + kGlideH + 5.0f;
 private:
     IRECT closeRect() const { return IRECT(mRECT.R-18, mRECT.T+3, mRECT.R-4, mRECT.T+17); }
     // Loop row, then a gap, then the two playback rows
@@ -581,7 +603,22 @@ private:
         const float t = mRECT.T + kHead + 3.0f + i*kRow + (i>0 ? 4.0f : 0.0f);
         return IRECT(mRECT.L, t, mRECT.R, t+kRow);
     }
+    // Below the playback rows, after a separator
+    IRECT glideRow() const {
+        const float t = mRECT.T + kHead + 3.0f + 3*kRow + 4.0f + 7.0f;
+        return IRECT(mRECT.L, t, mRECT.R, t + kGlideH);
+    }
+    IRECT glideBar() const { const IRECT r = glideRow(); return IRECT(r.L+8, r.T+18, r.R-8, r.T+25); }
+    // Square law: finer steps at the short glide times that get used most
+    void setGlideFromX(float x) {
+        const IRECT b = glideBar();
+        const float n = std::clamp((x - b.L) / b.W(), 0.0f, 1.0f);
+        mGlideMs = std::round(n * n * kGlideMaxMs);
+        SetDirty(false);
+    }
     std::atomic<bool>& mMono;
+    std::atomic<float>& mGlideMs;
+    bool mDragGlide = false;
     std::function<bool()> mLoopOn;
     std::function<void(bool)> mSetLoop;
     std::function<void()> mChanged;
@@ -1099,6 +1136,7 @@ public:
     std::atomic<bool> mLoopEnabled{true};   // set per sound on load: on for Bass / Lead-Pad, off otherwise
     static constexpr const char* kPresetLoopKey = "Loop";   // per-sound preset entry for the loop switch
     std::atomic<bool> mMono{false};
+    std::atomic<float> mGlideMs{80.0f};   // portamento between legato notes in mono + loop (settings only)
     void setLoopEnabled(bool on);
     void savePersistentState() const;
     void loadPersistentState();
@@ -1113,7 +1151,13 @@ private:
         int    noteNum{-1},startSample{0};
         double srcPos{0.0},pitchRatio{1.0};
         float  level{0.0f},relLeft{0.0f},relTotal{0.0f};
+        // Pitch in semitones from the root (C3); glides toward targetSemis by glideStep per sample
+        double semis{0.0},targetSemis{0.0},glideStep{0.0};
     };
+    double ratioFor(double semis) const;   // playback rate for a pitch, incl. sample-rate conversion
+    // Keys held down, oldest first: mono glide returns to the previous one when the newest is released
+    std::array<int,16> mHeld{}; int mNumHeld{0};
+    void glideVoice(Voice& v, int note);
     static constexpr int kNumVoices=8;
     std::array<Voice,kNumVoices> mVoices;
     int mVoiceTimer{0};

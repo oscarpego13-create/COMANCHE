@@ -130,7 +130,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             const float gx = W - 12.0f - tw - 8.0f, gs = 12.0f;
             // Panel opens to the left of the gear (right edge just left of it) so it never leaves the window;
             // attached last, after the layout, so it draws on top
-            settings = new SettingsPanel(IRECT(gx-gs-4-SettingsPanel::kW, 4, gx-gs-4, 4+SettingsPanel::kH), mMono,
+            settings = new SettingsPanel(IRECT(gx-gs-4-SettingsPanel::kW, 4, gx-gs-4, 4+SettingsPanel::kH), mMono, mGlideMs,
                 [this] { return mLoopEnabled.load(); },
                 [this](bool on) { setLoopEnabled(on); },
                 [this] { markStateDirty(); });
@@ -254,6 +254,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
 
 void COMANCHE::OnReset()
 {
+    mNumHeld = 0;
     ctrace("OnReset sr=%.0f block=%d", GetSampleRate(), GetBlockSize());
     mFX.prepare(GetSampleRate(), GetBlockSize());
     for (auto& v : mVoices) v = Voice{};
@@ -298,6 +299,11 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
                 // Looping types (Bass, Lead / Pad) wrap inside the crossfaded loop until released
                 if (mLoopActive && v.srcPos >= mLoopEnd) v.srcPos -= (double)(mLoopEnd - mLoopStart);
                 if (v.srcPos >= mSampleLen) { v.active=false; continue; }
+                if (v.glideStep != 0.0) {   // portamento: constant time, linear in semitones
+                    v.semis += v.glideStep;
+                    if ((v.glideStep > 0.0) == (v.semis >= v.targetSemis)) { v.semis = v.targetSemis; v.glideStep = 0.0; }
+                    v.pitchRatio = ratioFor(v.semis);
+                }
                 float env = v.level;
                 if (v.inRelease) {
                     if (v.relLeft <= 0.0f) { v.active=false; continue; }
@@ -405,8 +411,32 @@ int COMANCHE::stealVoice()
     return oldest;
 }
 
+double COMANCHE::ratioFor(double semis) const
+{
+    return std::pow(2.0, semis / 12.0) * mSampleSR / GetSampleRate();
+}
+
+void COMANCHE::glideVoice(Voice& v, int note)
+{
+    v.noteNum     = note;
+    v.targetSemis = note - 60;
+    const double samples = std::max(1.0, mGlideMs.load() * 0.001 * GetSampleRate());
+    v.glideStep   = (v.targetSemis - v.semis) / samples;
+}
+
 void COMANCHE::noteOn(int note, float vel)
 {
+    // Track held keys (newest last) for mono glide
+    int k = 0;
+    for (int i = 0; i < mNumHeld; i++) if (mHeld[i] != note) mHeld[k++] = mHeld[i];
+    mNumHeld = k;
+    if (mNumHeld < (int)mHeld.size()) mHeld[mNumHeld++] = note;
+
+    // Mono + loop with glide: a new key while one is held slides the sounding voice to it (legato)
+    if (mMono && mLoopActive && mGlideMs.load() > 0.5f) {
+        for (auto& v : mVoices)
+            if (v.active && !v.inRelease) { glideVoice(v, note); return; }
+    }
     // Mono: a new note fades out whatever is playing (5 ms) before starting
     if (mMono) {
         for (auto& v : mVoices)
@@ -425,7 +455,9 @@ void COMANCHE::noteOn(int note, float vel)
     v.inRelease  = false;
     v.noteNum    = note;
     v.srcPos     = 0.0;
-    v.pitchRatio = std::pow(2.0, (note-60)/12.0) * mSampleSR / GetSampleRate();
+    v.semis      = v.targetSemis = note - 60;
+    v.glideStep  = 0.0;
+    v.pitchRatio = ratioFor(v.semis);
     v.level      = vel;
     v.startSample= mVoiceTimer;
     v.relTotal   = 0.08f * (float)GetSampleRate();
@@ -434,6 +466,15 @@ void COMANCHE::noteOn(int note, float vel)
 
 void COMANCHE::noteOff(int note)
 {
+    int k = 0;
+    for (int i = 0; i < mNumHeld; i++) if (mHeld[i] != note) mHeld[k++] = mHeld[i];
+    mNumHeld = k;
+
+    // Mono glide: releasing the sounding key while others are held slides back to the newest of them
+    if (mMono && mLoopActive && mGlideMs.load() > 0.5f && mNumHeld > 0) {
+        for (auto& v : mVoices)
+            if (v.active && !v.inRelease && v.noteNum == note) { glideVoice(v, mHeld[mNumHeld - 1]); return; }
+    }
     for (auto& v : mVoices)
         if (v.active && !v.inRelease && v.noteNum == note) {
             v.inRelease = true;
@@ -442,11 +483,13 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
-// Format v3: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [params]
+// Format v4: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [params]
+// Format v3: same without glide
 // Format v2: same without loop/mono
 // Format v1 (old, broken): [folder(str)] [params]  — sample was never saved
 static constexpr int kSerializeMagicV2 = 0x434F4D32; // 'COM2'
-static constexpr int kSerializeMagic   = 0x434F4D33; // 'COM3'
+static constexpr int kSerializeMagicV3 = 0x434F4D33; // 'COM3'
+static constexpr int kSerializeMagic   = 0x434F4D34; // 'COM4'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
@@ -460,6 +503,8 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     const int loop = mLoopEnabled ? 1 : 0, mono = mMono ? 1 : 0;
     chunk.Put(&loop);
     chunk.Put(&mono);
+    const float glide = mGlideMs.load();
+    chunk.Put(&glide);
     return SerializeParams(chunk);
 }
 
@@ -469,7 +514,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
-    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV2)) {
+    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
         // v2 / v3: full restore
         pos = afterMagic;
         WDL_String folder;
@@ -498,12 +543,17 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
-        if (magic == kSerializeMagic) {
+        if (magic == kSerializeMagic || magic == kSerializeMagicV3) {
             int loop = 1, mono = 0;
             pos = chunk.Get(&loop, pos);
             pos = chunk.Get(&mono, pos);
             mMono = mono != 0;
             setLoopEnabled(loop != 0);
+        }
+        if (magic == kSerializeMagic) {
+            float glide = 80.0f;
+            pos = chunk.Get(&glide, pos);
+            mGlideMs = std::clamp(glide, 0.0f, SettingsPanel::kGlideMaxMs);
         }
     } else {
         // v1 (old saves): folder + params only, no sample
