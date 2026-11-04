@@ -111,6 +111,30 @@ SoundType SoundClassifier::fromAudio(const std::vector<float>& left, const std::
     return SoundType::Keys;   // transient that decays
 }
 
+// Fine-tune the end so the audio before it lines up with the audio before the start (same phase):
+// the crossfade then blends matching waveforms instead of cancelling.
+int SoundClassifier::alignLoopEnd(const std::vector<float>& left, const std::vector<float>& right, double sr,
+                                  int start, int end)
+{
+    auto mono = [&](int i) { return right.empty() ? (double)left[i] : 0.5 * ((double)left[i] + right[i]); };
+    end = std::min(end, (int)left.size());
+    const int xf = std::max(1, (int)((end - start) * kLoopCrossfade));
+    const int cmpLen = std::min({xf, (int)(sr * 0.05), start});
+    if (cmpLen < 8) return end;
+    const int range = (int)(sr * 0.025);   // covers a full period down to 40 Hz
+    double best = -2.0; int bestEnd = end;
+    for (int e = end; e >= std::max(start + (int)(sr * 0.06), end - range); e--) {
+        double xy = 0, xx = 0, yy = 0;
+        for (int i = 1; i <= cmpLen; i += 2) {
+            const double x = mono(e - i), y = mono(start - i);
+            xy += x * y; xx += x * x; yy += y * y;
+        }
+        const double c = xy / std::sqrt(xx * yy + 1e-20);
+        if (c > best) { best = c; bestEnd = e; }
+    }
+    return bestEnd;
+}
+
 bool SoundClassifier::findLoop(const std::vector<float>& left, const std::vector<float>& right, double sr,
                                int& loopStart, int& loopEnd)
 {
@@ -143,23 +167,7 @@ bool SoundClassifier::findLoop(const std::vector<float>& left, const std::vector
     int end = (endWin + 1) * win;
     if (end - start < (int)(sr * 0.06)) return false;
 
-    // Fine-tune the end so the audio before it lines up with the audio before the start (same phase):
-    // the crossfade then blends matching waveforms instead of cancelling.
-    const int xf = std::max(1, (int)((end - start) * kLoopCrossfade));
-    const int cmpLen = std::min(xf, (int)(sr * 0.05));
-    const int range = (int)(sr * 0.025);   // covers a full period down to 40 Hz
-    double best = -2.0; int bestEnd = end;
-    for (int e = end; e >= std::max(start + (int)(sr * 0.06), end - range); e--) {
-        if (start - cmpLen < 0 || e > (int)m.size()) continue;
-        double xy = 0, xx = 0, yy = 0;
-        for (int i = 1; i <= cmpLen; i += 2) {
-            const double x = m[e - i], y = m[start - i];
-            xy += x * y; xx += x * x; yy += y * y;
-        }
-        const double c = xy / std::sqrt(xx * yy + 1e-20);
-        if (c > best) { best = c; bestEnd = e; }
-    }
-    end = bestEnd;
+    end = alignLoopEnd(left, right, sr, start, end);
     if (start - (int)((end - start) * kLoopCrossfade) < 0) return false;
     loopStart = start;
     loopEnd = end;

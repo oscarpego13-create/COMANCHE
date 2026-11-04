@@ -29,6 +29,10 @@ namespace SoundClassifier
     bool findLoop(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,
                   int& loopStart, int& loopEnd);
 
+    // Moves a loop end back (up to 25 ms) to where the audio lines up in phase with the loop start
+    int alignLoopEnd(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,
+                     int loopStart, int loopEnd);
+
     // Copy of the sample whose last kLoopCrossfade of the loop fades into the audio before loopStart,
     // with a constant-power S-curve, so jumping from loopEnd back to loopStart is seamless.
     void buildLoop(const std::vector<float>& left, const std::vector<float>& right, double sampleRate,

@@ -469,6 +469,21 @@ public:
         mScroll=std::clamp(mScroll-(int)d,0,maxSc); SetDirty(false);
     }
     void refresh(){mScroll=0;SetDirty(false);}
+    // Keyboard: step through the rows on show (they follow the type filter), load it and keep it in view
+    void moveSelection(int delta) {
+        const std::vector<int> vis = visible();
+        if (vis.empty()) return;
+        const auto it = std::find(vis.begin(), vis.end(), mSelected);
+        const int r = it != vis.end() ? std::clamp((int)(it - vis.begin()) + delta, 0, (int)vis.size() - 1)
+                                      : (delta > 0 ? 0 : (int)vis.size() - 1);
+        if (vis[r] == mSelected) return;
+        mSelected = vis[r];
+        const int maxRows = std::max(1, (int)(mRECT.H() / UI::kRowH));
+        if (r < mScroll) mScroll = r;
+        else if (r >= mScroll + maxRows) mScroll = r - maxRows + 1;
+        GetDelegate()->SendArbitraryMsgFromUI(kMsgLoadSample, kNoTag, sizeof(int), &mSelected);
+        SetDirty(false);
+    }
     void OnDrop(const char* str) override {
         if (mDropFn && str) { mScroll=0; mDropFn(std::string(str)); }
     }
@@ -531,9 +546,16 @@ private:
 class SettingsPanel final : public IControl
 {
 public:
+    // The loop zone on the timeline, as fractions of the sound
+    struct LoopZone {
+        std::function<float()> start, end, seconds;      // seconds: length of the whole sound
+        std::function<bool()>  manual;
+        std::function<void(float, float, bool)> set;     // start, end, final (mouse released)
+        std::function<void()>  reset;                    // back to the detected loop
+    };
     SettingsPanel(const IRECT& b, std::atomic<bool>& mono, std::atomic<float>& glideMs, std::atomic<float>& velDynamics,
-                  std::function<bool()> loopOn, std::function<void(bool)> setLoop, std::function<void()> changed)
-        : IControl(b, kNoParameter), mMono(mono), mGlideMs(glideMs), mVelDynamics(velDynamics), mLoopOn(std::move(loopOn)),
+                  LoopZone zone, std::function<bool()> loopOn, std::function<void(bool)> setLoop, std::function<void()> changed)
+        : IControl(b, kNoParameter), mMono(mono), mGlideMs(glideMs), mVelDynamics(velDynamics), mZone(std::move(zone)), mLoopOn(std::move(loopOn)),
           mSetLoop(std::move(setLoop)), mChanged(std::move(changed)) { Hide(true); }
     void Draw(IGraphics& g) override {
         g.FillRoundRect(CT::bgPrimary, mRECT, 4.0f);
@@ -558,6 +580,8 @@ public:
             g.DrawText(t, kLabels[i], IRECT(box.R+6, r.T, r.R, r.B));
         }
 
+        drawTimeline(g);
+
         // Sliders: label + value, then a bar to drag (separator above each).
         // Glide is dimmed while it can't act (needs mono and loop).
         const bool live = mMono && mLoopOn();
@@ -565,6 +589,24 @@ public:
         drawSlider(g, kGlide, live ? "Glide" : "Glide (mono + loop)", ms.Get(), glideNorm(), live);
         WDL_String pc; pc.SetFormatted(16, "%d%%", (int)std::lround(mVelDynamics.load() * 100.0f));
         drawSlider(g, kVelocity, "Velocidad -> din\xC3\xA1mica", pc.Get(), mVelDynamics.load(), true);
+    }
+    // The whole sound as a bar, with the loop zone between two handles; "auto" until it's moved by hand
+    void drawTimeline(IGraphics& g) {
+        const bool live = mLoopOn();
+        const IRECT bar = timelineBar();
+        const float s = mZone.start(), e = mZone.end(), sec = mZone.seconds();
+        WDL_String v;
+        if (mZone.manual() && sec > 0.0f) v.SetFormatted(24, "%.2f-%.2f s", s * sec, e * sec);
+        else v.Set("auto");
+        const IText vt(9.0f, live ? CT::textInk : CT::btnInactive, "RobotoMono", EAlign::Far, EVAlign::Middle);
+        const IRECT r0 = row(0);
+        g.DrawText(vt, v.Get(), IRECT(r0.L, r0.T, r0.R-8, r0.B));
+        g.FillRoundRect(CT::btnInactive, bar, 2.0f);
+        const float xs = bar.L + s*bar.W(), xe = bar.L + e*bar.W();
+        g.FillRect(CT::textInk.WithOpacity(live ? 0.35f : 0.15f), IRECT(xs, bar.T, xe, bar.B));
+        const IColor hc = live ? CT::fgPrimary : CT::textInk.WithOpacity(0.35f);
+        g.FillRect(hc, IRECT(xs-1.5f, bar.T-1.0f, xs+1.5f, bar.B+1.0f));
+        g.FillRect(hc, IRECT(xe-1.5f, bar.T-1.0f, xe+1.5f, bar.B+1.0f));
     }
     void drawSlider(IGraphics& g, int i, const char* label, const char* value, float n, bool live) {
         const IRECT gr = sliderRow(i);
@@ -580,6 +622,7 @@ public:
     }
     void OnMouseDown(float x, float y, const IMouseMod&) override {
         if (closeRect().Contains(x, y)) { Hide(true); return; }
+        if (timelineHit().Contains(x, y)) { grabTimeline(x); return; }
         for (int i : {kGlide, kVelocity})
             if (sliderRow(i).Contains(x, y)) { mDragSlider = i; setSliderFromX(i, x); return; }
         if      (row(0).Contains(x, y)) mSetLoop(!mLoopOn());
@@ -594,25 +637,59 @@ public:
         if (o != mOverClose) { mOverClose = o; SetDirty(false); }
     }
     void OnMouseOut() override { mOverClose = false; SetDirty(false); }
-    void OnMouseDrag(float x, float, float, float, const IMouseMod&) override { if (mDragSlider >= 0) setSliderFromX(mDragSlider, x); }
-    void OnMouseUp(float, float, const IMouseMod&) override {
+    void OnMouseDrag(float x, float, float, float, const IMouseMod&) override {
+        if (mDragSlider >= 0) setSliderFromX(mDragSlider, x);
+        else if (mDragZone != kZoneNone) { mZoneMoved = true; moveZone(x, false); }
+    }
+    void OnMouseUp(float x, float, const IMouseMod&) override {
         if (mDragSlider >= 0) { mDragSlider = -1; if (mChanged) mChanged(); }
+        if (mDragZone != kZoneNone) {
+            if (mZoneMoved) { moveZone(x, true); if (mChanged) mChanged(); }
+            mDragZone = kZoneNone;
+        }
+    }
+    void OnMouseDblClick(float x, float y, const IMouseMod&) override {
+        if (timelineHit().Contains(x, y)) { mZone.reset(); if (mChanged) mChanged(); SetDirty(false); }
     }
     void Toggle() { Hide(!IsHidden()); }
     static constexpr float kGlideMaxMs = 1000.0f;
     static constexpr float kW = 196.0f, kHead = 20.0f, kRow = 19.0f, kGlideH = 30.0f;
-    static constexpr float kH = kHead + 3.0f + 3*kRow + 4.0f + 2*(7.0f + kGlideH) + 5.0f;
+    static constexpr float kTimelineH = 15.0f;
+    static constexpr float kH = kHead + 3.0f + 3*kRow + 4.0f + kTimelineH + 2*(7.0f + kGlideH) + 5.0f;
 private:
     IRECT closeRect() const { return IRECT(mRECT.R-18, mRECT.T+3, mRECT.R-4, mRECT.T+17); }
-    // Loop row, then a gap, then the two playback rows
+    // Loop row and its timeline, then a gap, then the two playback rows
     IRECT row(int i) const {
-        const float t = mRECT.T + kHead + 3.0f + i*kRow + (i>0 ? 4.0f : 0.0f);
+        const float t = mRECT.T + kHead + 3.0f + i*kRow + (i>0 ? 4.0f + kTimelineH : 0.0f);
         return IRECT(mRECT.L, t, mRECT.R, t+kRow);
+    }
+    IRECT timelineBar() const { const IRECT r = row(0); return IRECT(r.L+10, r.B+2, r.R-10, r.B+12); }
+    IRECT timelineHit() const { return timelineBar().GetPadded(-6.0f, -2.0f, 6.0f, 2.0f); }
+    float timelineNorm(float x) const { const IRECT b = timelineBar(); return std::clamp((x - b.L) / b.W(), 0.0f, 1.0f); }
+    // Near a handle: take it. Inside the zone: move all of it. Outside: the nearest handle jumps there.
+    void grabTimeline(float x) {
+        const IRECT b = timelineBar();
+        const float n = timelineNorm(x), s = mZone.start(), e = mZone.end();
+        const float near = 7.0f / b.W();
+        mZoneMoved = false;
+        if (std::abs(n - s) <= near && std::abs(n - s) <= std::abs(n - e)) { mDragZone = kZoneStart; mGrab = n - s; }
+        else if (std::abs(n - e) <= near) { mDragZone = kZoneEnd; mGrab = n - e; }
+        else if (n > s && n < e) { mDragZone = kZoneBoth; mGrab = n - s; }
+        else { mDragZone = n < s ? kZoneStart : kZoneEnd; mGrab = 0.0f; mZoneMoved = true; moveZone(x, false); }
+    }
+    void moveZone(float x, bool final) {
+        const float n = timelineNorm(x) - mGrab;
+        float s = mZone.start(), e = mZone.end();
+        if (mDragZone == kZoneStart) s = n;
+        else if (mDragZone == kZoneEnd) e = n;
+        else { const float w = e - s; s = std::clamp(n, 0.0f, 1.0f - w); e = s + w; }
+        mZone.set(s, e, final);
+        SetDirty(false);
     }
     enum { kGlide = 0, kVelocity = 1 };
     // Slider rows below the playback rows, each after a separator
     IRECT sliderRow(int i) const {
-        const float t = mRECT.T + kHead + 3.0f + 3*kRow + 4.0f + 7.0f + i * (kGlideH + 7.0f);
+        const float t = mRECT.T + kHead + 3.0f + 3*kRow + 4.0f + kTimelineH + 7.0f + i * (kGlideH + 7.0f);
         return IRECT(mRECT.L, t, mRECT.R, t + kGlideH);
     }
     IRECT sliderBar(int i) const { const IRECT r = sliderRow(i); return IRECT(r.L+8, r.T+18, r.R-8, r.T+25); }
@@ -628,6 +705,11 @@ private:
     std::atomic<bool>& mMono;
     std::atomic<float>& mGlideMs;
     std::atomic<float>& mVelDynamics;
+    LoopZone mZone;
+    enum { kZoneNone, kZoneStart, kZoneEnd, kZoneBoth };
+    int   mDragZone = kZoneNone;
+    float mGrab = 0.0f;
+    bool  mZoneMoved = false;
     int mDragSlider = -1;
     std::function<bool()> mLoopOn;
     std::function<void(bool)> mSetLoop;
@@ -1145,6 +1227,8 @@ public:
     // Settings (gear): loop Bass / Lead-Pad while the key is held, mono or poly playback
     std::atomic<bool> mLoopEnabled{true};   // set per sound on load: on for Bass / Lead-Pad, off otherwise
     static constexpr const char* kPresetLoopKey = "Loop";   // per-sound preset entry for the loop switch
+    static constexpr const char* kPresetLoopStartKey = "LoopStart";   // hand-placed loop zone (fractions)
+    static constexpr const char* kPresetLoopEndKey   = "LoopEnd";
     std::atomic<bool> mMono{false};
     std::atomic<float> mGlideMs{80.0f};   // portamento between legato notes in mono + loop (settings only)
     std::atomic<float> mVelDynamics{1.0f};   // how much key velocity shapes note level: 1 = fully, 0 = always full level
@@ -1164,6 +1248,7 @@ private:
         float  level{0.0f},relLeft{0.0f},relTotal{0.0f};
         // Pitch in semitones from the root (C3); glides toward targetSemis by glideStep per sample
         double semis{0.0},targetSemis{0.0},glideStep{0.0};
+        double fadePos{-1.0};   // position in the previous loop while crossfading to a moved loop (< 0: none)
     };
     double ratioFor(double semis) const;   // playback rate for a pitch, incl. sample-rate conversion
     // Keys held down, oldest first: mono glide returns to the previous one when the newest is released
@@ -1180,6 +1265,17 @@ private:
     std::vector<float> mLoopL, mLoopR;
     int  mLoopStart{0}, mLoopEnd{0};
     bool mHasLoop{false}, mLoopActive{false};
+    // Loop zone as fractions of the sound, for the settings timeline. Manual = placed by hand, else detected
+    std::atomic<float> mLoopStartN{0.5f}, mLoopEndN{1.0f};
+    std::atomic<bool>  mLoopManual{false};
+    std::vector<float> mPrevLoopL, mPrevLoopR;   // copy being faded out after the loop moved
+    int  mPrevLoopStart{0}, mPrevLoopEnd{0};
+    int  mLoopFadeLeft{0}, mLoopFadeTotal{1};
+    std::chrono::steady_clock::time_point mLastLoopBuild{};
+    std::chrono::steady_clock::time_point mLastArrowKey{};
+    void rebuildLoop(int loopStart, int loopEnd);
+    void setLoopRegion(float startN, float endN, bool final);
+    void resetLoopRegion();
     SoundType mSampleType{SoundType::Pending};
     void updateLoopActive();   // call with mSampleMutex held
 

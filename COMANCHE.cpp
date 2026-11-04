@@ -98,7 +98,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         g->AttachControl(new TypeFilterBar(IRECT(4, bB+4, panelW-4, bB+20), mTypeFilter,
             [this]() { if (GetUI()) GetUI()->SetAllControlsDirty(); }));
 
-        g->AttachControl(new SampleListControl(IRECT(2, bB+24, panelW-2, H-2), mLibrary.getSampleNames(), mSelectedIdx,
+        auto* sampleList = new SampleListControl(IRECT(2, bB+24, panelW-2, H-2), mLibrary.getSampleNames(), mSelectedIdx,
             [this](int i) { return soundTypeOf(i); }, mTypeFilter, mTypesVersion,
             // OnDrop
             [this](const std::string& filePath) {
@@ -117,7 +117,20 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             [this](int idx) { removeFromLibrary(idx); },
             // OnResetPreset (right-click → "Eliminar Preset")
             [this](int idx) { resetPresetForSample(idx); }
-        ));
+        );
+        g->AttachControl(sampleList);
+
+        // Up / down arrows step through the library. A press can reach us twice (from the view and
+        // forwarded by the host), so one within 5 ms of the last is the same press.
+        g->SetKeyHandlerFunc([this, sampleList](const IKeyPress& key, bool isUp) {
+            if (key.VK != kVK_UP && key.VK != kVK_DOWN) return false;
+            const auto now = std::chrono::steady_clock::now();
+            if (!isUp && now - mLastArrowKey > std::chrono::milliseconds(5)) {
+                mLastArrowKey = now;
+                sampleList->moveSelection(key.VK == kVK_DOWN ? 1 : -1);
+            }
+            return true;
+        });
 
         // ── Header: signature top right, settings gear just left of it ───────────
         SettingsPanel* settings = nullptr;
@@ -131,6 +144,13 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             // Panel opens to the left of the gear (right edge just left of it) so it never leaves the window;
             // attached last, after the layout, so it draws on top
             settings = new SettingsPanel(IRECT(gx-gs-4-SettingsPanel::kW, 4, gx-gs-4, 4+SettingsPanel::kH), mMono, mGlideMs, mVelDynamics,
+                SettingsPanel::LoopZone{
+                    [this] { return mLoopStartN.load(); },
+                    [this] { return mLoopEndN.load(); },
+                    [this] { return mSampleSR > 0.0 ? (float)(mSampleLen / mSampleSR) : 0.0f; },
+                    [this] { return mLoopManual.load(); },
+                    [this](float s, float e, bool final) { setLoopRegion(s, e, final); },
+                    [this] { resetLoopRegion(); } },
                 [this] { return mLoopEnabled.load(); },
                 [this](bool on) { setLoopEnabled(on); },
                 [this] { markStateDirty(); });
@@ -311,10 +331,21 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
                     v.relLeft -= 1.0f;
                 }
                 const int wrapAt = mLoopActive ? mLoopEnd : -1;
-                mTmpL[s] += lerp(srcL, v.srcPos, wrapAt, mLoopStart) * env;
-                mTmpR[s] += lerp(srcR, v.srcPos, wrapAt, mLoopStart) * env;
+                float outL = lerp(srcL, v.srcPos, wrapAt, mLoopStart);
+                float outR = lerp(srcR, v.srcPos, wrapAt, mLoopStart);
+                if (mLoopFadeLeft > 0 && v.fadePos >= 0.0 && mLoopActive) {
+                    // Loop moved under this voice: fade from what it was playing into the new position
+                    const float w = 1.0f - (float)mLoopFadeLeft / (float)mLoopFadeTotal;
+                    if (v.fadePos >= mPrevLoopEnd) v.fadePos -= (double)(mPrevLoopEnd - mPrevLoopStart);
+                    outL = lerp(mPrevLoopL, v.fadePos, mPrevLoopEnd, mPrevLoopStart) * (1.0f - w) + outL * w;
+                    outR = lerp(mPrevLoopR, v.fadePos, mPrevLoopEnd, mPrevLoopStart) * (1.0f - w) + outR * w;
+                    v.fadePos += v.pitchRatio;
+                }
+                mTmpL[s] += outL * env;
+                mTmpR[s] += outR * env;
                 v.srcPos  += v.pitchRatio;
             }
+            if (mLoopFadeLeft > 0) mLoopFadeLeft--;
         }
         mVoiceTimer++;
     }
@@ -455,6 +486,7 @@ void COMANCHE::noteOn(int note, float vel)
     v.inRelease  = false;
     v.noteNum    = note;
     v.srcPos     = 0.0;
+    v.fadePos    = -1.0;
     v.semis      = v.targetSemis = note - 60;
     v.glideStep  = 0.0;
     v.pitchRatio = ratioFor(v.semis);
@@ -484,7 +516,9 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
-// Format v5: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)] [params]
+// Format v6: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)]
+//            [loopManual(int)] [loopStart(float)] [loopEnd(float)] [params]
+// Format v5: same without the manual loop zone
 // Format v4: same without velDynamics
 // Format v3: same without glide
 // Format v2: same without loop/mono
@@ -492,7 +526,8 @@ void COMANCHE::noteOff(int note)
 static constexpr int kSerializeMagicV2 = 0x434F4D32; // 'COM2'
 static constexpr int kSerializeMagicV3 = 0x434F4D33; // 'COM3'
 static constexpr int kSerializeMagicV4 = 0x434F4D34; // 'COM4'
-static constexpr int kSerializeMagic   = 0x434F4D35; // 'COM5'
+static constexpr int kSerializeMagicV5 = 0x434F4D35; // 'COM5'
+static constexpr int kSerializeMagic   = 0x434F4D36; // 'COM6'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
@@ -509,6 +544,11 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     const float glide = mGlideMs.load(), dyn = mVelDynamics.load();
     chunk.Put(&glide);
     chunk.Put(&dyn);
+    const int manual = mLoopManual ? 1 : 0;
+    const float zoneStart = mLoopStartN.load(), zoneEnd = mLoopEndN.load();
+    chunk.Put(&manual);
+    chunk.Put(&zoneStart);
+    chunk.Put(&zoneEnd);
     return SerializeParams(chunk);
 }
 
@@ -518,7 +558,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
-    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
+    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
         // v2 / v3: full restore
         pos = afterMagic;
         WDL_String folder;
@@ -547,22 +587,29 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
-        if (magic == kSerializeMagic || magic == kSerializeMagicV4 || magic == kSerializeMagicV3) {
+        if (magic == kSerializeMagic || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3) {
             int loop = 1, mono = 0;
             pos = chunk.Get(&loop, pos);
             pos = chunk.Get(&mono, pos);
             mMono = mono != 0;
             setLoopEnabled(loop != 0);
         }
-        if (magic == kSerializeMagic || magic == kSerializeMagicV4) {
+        if (magic == kSerializeMagic || magic == kSerializeMagicV5 || magic == kSerializeMagicV4) {
             float glide = 80.0f;
             pos = chunk.Get(&glide, pos);
             mGlideMs = std::clamp(glide, 0.0f, SettingsPanel::kGlideMaxMs);
         }
-        if (magic == kSerializeMagic) {
+        if (magic == kSerializeMagic || magic == kSerializeMagicV5) {
             float dyn = 1.0f;
             pos = chunk.Get(&dyn, pos);
             mVelDynamics = std::clamp(dyn, 0.0f, 1.0f);
+        }
+        if (magic == kSerializeMagic) {
+            int manual = 0; float zoneStart = 0.5f, zoneEnd = 1.0f;
+            pos = chunk.Get(&manual, pos);
+            pos = chunk.Get(&zoneStart, pos);
+            pos = chunk.Get(&zoneEnd, pos);
+            if (manual) setLoopRegion(zoneStart, zoneEnd, true);
         }
     } else {
         // v1 (old saves): folder + params only, no sample
@@ -653,9 +700,80 @@ bool COMANCHE::loadSampleData(const std::string& path)
     mLoopEnd   = le;
     mHasLoop   = hasLoop;
     mSampleType = type;
+    mPrevLoopL.clear(); mPrevLoopR.clear(); mLoopFadeLeft = 0;
+    mLoopManual = false;
+    mLoopStartN = hasLoop ? (float)ls / (float)mSampleLen : 0.5f;
+    mLoopEndN   = hasLoop ? (float)le / (float)mSampleLen : 1.0f;
     updateLoopActive();
     for (auto& v : mVoices) v.active = false;
     return true;
+}
+
+// Rebuilds the loop off the audio thread, then swaps it in under the lock. Voices beyond the new end
+// jump inside it, and every sounding voice crossfades from its old stream for 20 ms, so moving the
+// loop while a note is held doesn't click.
+void COMANCHE::rebuildLoop(int ls, int le)
+{
+    std::vector<float> loopL, loopR;
+    SoundClassifier::buildLoop(mSampleL, mSampleR, mSampleSR, ls, le, loopL, loopR);
+    {
+        std::lock_guard<std::mutex> lock(mSampleMutex);
+        mPrevLoopL.swap(mLoopL); mPrevLoopR.swap(mLoopR);
+        mPrevLoopStart = mLoopStart; mPrevLoopEnd = mLoopEnd;
+        mLoopL.swap(loopL);      mLoopR.swap(loopR);       // loopL/R now hold the older copy, freed unlocked
+        const bool canFade = mPrevLoopL.size() == mLoopL.size();
+        mLoopFadeTotal = mLoopFadeLeft = canFade ? std::max(1, (int)(0.02 * GetSampleRate())) : 0;
+        mLoopStart = ls;
+        mLoopEnd   = le;
+        mHasLoop   = true;
+        updateLoopActive();
+        for (auto& v : mVoices) {
+            if (!v.active) continue;
+            v.fadePos = canFade ? v.srcPos : -1.0;
+            if (mLoopActive && v.srcPos >= le) v.srcPos = ls + std::fmod(v.srcPos - ls, (double)(le - ls));
+        }
+    }
+}
+
+// Loop zone chosen by hand, as fractions of the sound. While dragging, the audio is rebuilt at most
+// every 30 ms; the last call (final) always applies.
+void COMANCHE::setLoopRegion(float startN, float endN, bool final)
+{
+    mLoopManual = true;
+    const double len = mSampleLen, sr = mSampleSR;
+    if (len <= 0.0 || sr <= 0.0) { mLoopStartN = startN; mLoopEndN = endN; return; }
+    const float minLen = (float)(sr * 0.07 / len);     // alignLoopEnd may take a little off the end
+    if (minLen >= 0.98f) return;                        // too short to loop
+    startN = std::clamp(startN, 0.01f, 1.0f - minLen);
+    endN   = std::clamp(endN, startN + minLen, 1.0f);
+    mLoopStartN = startN;
+    mLoopEndN   = endN;
+
+    const auto minGap = std::chrono::milliseconds(30);
+    const auto since = std::chrono::steady_clock::now() - mLastLoopBuild;
+    if (since < minGap) {
+        if (!final) return;
+        std::this_thread::sleep_for(minGap - since);   // let the running 20 ms fade end: swapping mid-fade would jump
+    }
+    mLastLoopBuild = std::chrono::steady_clock::now();
+    const int ls = (int)(startN * len), le = (int)(endN * len);
+    rebuildLoop(ls, SoundClassifier::alignLoopEnd(mSampleL, mSampleR, sr, ls, le));
+}
+
+void COMANCHE::resetLoopRegion()
+{
+    mLoopManual = false;
+    int ls = 0, le = 0;
+    if (mSampleLen <= 0 || !SoundClassifier::findLoop(mSampleL, mSampleR, mSampleSR, ls, le)) {
+        mLoopStartN = 0.5f; mLoopEndN = 1.0f;
+        std::lock_guard<std::mutex> lock(mSampleMutex);
+        mHasLoop = false;
+        updateLoopActive();
+        return;
+    }
+    mLoopStartN = (float)ls / (float)mSampleLen;
+    mLoopEndN   = (float)le / (float)mSampleLen;
+    rebuildLoop(ls, le);
 }
 
 void COMANCHE::updateLoopActive()
@@ -756,6 +874,8 @@ void COMANCHE::loadSample(int idx)
     const auto& saved = mPresets.getValues();
     const auto loopIt = saved.find(kPresetLoopKey);
     setLoopEnabled(loopIt != saved.end() ? loopIt->second > 0.5f : SoundClassifier::loops(mSampleType));
+    const auto zoneStart = saved.find(kPresetLoopStartKey), zoneEnd = saved.find(kPresetLoopEndKey);
+    if (zoneStart != saved.end() && zoneEnd != saved.end()) setLoopRegion(zoneStart->second, zoneEnd->second, true);
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
@@ -768,6 +888,7 @@ void COMANCHE::savePreset()
         vals[p->GetName()] = (float)p->Value();
     }
     vals[kPresetLoopKey] = mLoopEnabled ? 1.0f : 0.0f;
+    if (mLoopManual) { vals[kPresetLoopStartKey] = mLoopStartN.load(); vals[kPresetLoopEndKey] = mLoopEndN.load(); }
     mPresets.save(vals);
 }
 
@@ -791,6 +912,7 @@ void COMANCHE::resetPresetForSample(int idx)
         for (int pi = 0; pi < kNumParams; pi++)
             setParamFromUI(pi, GetParam(pi)->GetDefault(true));
         setLoopEnabled(SoundClassifier::loops(mSampleType));
+        resetLoopRegion();
         if (GetUI()) GetUI()->SetAllControlsDirty();
     }
 }
@@ -801,6 +923,7 @@ void COMANCHE::resetPreset()
         setParamFromUI(pi, GetParam(pi)->GetDefault(true));
     for (int pi = 0; pi < kNumParams; pi++) mMacroLink[pi] = 0;
     setLoopEnabled(SoundClassifier::loops(mSampleType));
+    resetLoopRegion();
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
