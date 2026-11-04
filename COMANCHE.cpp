@@ -136,7 +136,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         SettingsPanel* settings = nullptr;
         {
             const IText sigText(8.0f, CT::textInk, "RobotoMono", EAlign::Far, EVAlign::Middle);
-            const char* sig = "@laclave.pro v0.1.4";
+            const char* sig = "@laclave.pro v0.1.5";
             g->AttachControl(new ITextControl(IRECT(W-260, 0, W-12, hdrB), sig, sigText));
             IRECT tb;
             const float tw = g->MeasureText(sigText, sig, tb);

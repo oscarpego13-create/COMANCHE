@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(COMANCHE VERSION 0.1.4)
+project(COMANCHE VERSION 0.1.5)
 
 if(NOT DEFINED IPLUG2_DIR)
   set(IPLUG2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../iPlug2" CACHE PATH "iPlug2 root directory")
