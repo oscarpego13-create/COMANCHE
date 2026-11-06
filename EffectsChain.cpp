@@ -116,6 +116,8 @@ float EffectsChain::delayTimeSamples() const
     return (float)(sec * sr);
 }
 
+static constexpr float kChorusMakeupDb = 2.0f, kLn10 = 2.30258509f;
+
 float EffectsChain::distClip(float x, float a) noexcept { return std::tanh((1.0f+a*22.0f)*x); }
 float EffectsChain::distTape(float x, float a) noexcept { float d=(1.0f+a*12.0f)*x; return d/(1.0f+std::abs(d)); }
 float EffectsChain::distTube(float x, float a) noexcept {
@@ -243,8 +245,10 @@ void EffectsChain::process(float* outL, float* outR, int n)
             float mR = center + depth*std::sin(choPhase + (float)M_PI);
             float wL = readBuf(choBufL, choPos, mL);
             float wR = readBuf(choBufR, choPos, mR);
-            outL[i] = outL[i]*(1.0f-mSmoothChorus) + wL*mSmoothChorus;
-            outR[i] = outR[i]*(1.0f-mSmoothChorus) + wR*mSmoothChorus;
+            // Blending with the delayed copy loses level to phase cancellation: make up 0..2 dB with the knob
+            const float makeup = std::exp(mSmoothChorus * kChorusMakeupDb * (kLn10 / 20.0f));
+            outL[i] = (outL[i]*(1.0f-mSmoothChorus) + wL*mSmoothChorus) * makeup;
+            outR[i] = (outR[i]*(1.0f-mSmoothChorus) + wR*mSmoothChorus) * makeup;
             if (++choPos >= choSize) choPos = 0;
             choPhase += inc;
             if (choPhase > kTwoPiF) choPhase -= kTwoPiF;
