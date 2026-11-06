@@ -603,14 +603,24 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
 int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
 {
     ctrace("UnserializeState size=%d pos=%d", chunk.Size(), pos);
+    // IByteChunk::GetStr accepts any length and hands back a position past the data. Damaged state
+    // must not bring the host down: check first, and leave the plugin as it is if it doesn't fit.
+    auto stringFits = [&chunk](int at) {
+        int len = 0;
+        const int start = chunk.Get(&len, at);
+        return start > at && len >= 0 && len <= chunk.Size() - start;
+    };
+    const int startPos = pos;
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
     if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV6 || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
-        // v2 / v3: full restore
+        // v2 onwards: full restore
         pos = afterMagic;
+        if (!stringFits(pos)) return startPos;
         WDL_String folder;
         pos = chunk.GetStr(folder, pos);
+        if (!stringFits(pos)) return startPos;
         mFolderPath = folder.Get();
         if (!mFolderPath.empty()) { mLibrary.setFolder(mFolderPath); startClassification(); }
 
@@ -675,6 +685,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         }
     } else {
         // v1 (old saves): folder + params only, no sample
+        if (!stringFits(pos)) return startPos;
         mSamplePath.clear();
         mSelectedIdx = -1;
         WDL_String folder;
