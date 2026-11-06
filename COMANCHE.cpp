@@ -191,7 +191,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         // Right click on the MACRO opens its curve window, beside it so the knob stays in view
         const float curveR = mX - mW*0.5f - 6.0f;
         auto* macroCurve = new MacroCurvePanel(IRECT(std::max(panelW + 4.0f, curveR - MacroCurvePanel::kW), 6.0f, curveR, 6.0f + MacroCurvePanel::kH),
-            mMacroCurveOn, mMacroShape, mMacroRate, mMacroFreeMs, mMacroPhase, [this] { markStateDirty(); });
+            mMacroCurveOn, mMacroShape, mMacroRate, mMacroFreeMs, mMacroPhase, mMacroDrawn, [this] { markStateDirty(); });
         auto* macroKnob = new ComanacheKnob(IRECT(mX - mW*0.5f, rT+8, mX + mW*0.5f, rT+8+mH),
                                             kMacro, "MACRO", CT::knobGold, true);
         macroKnob->setMacroShown(&mMacroShown);
@@ -459,7 +459,7 @@ float COMANCHE::macroCurveValue(int nFrames)
     }
     mMacroPhaseRun -= std::floor(mMacroPhaseRun);
     mMacroPhase = (float)mMacroPhaseRun;
-    return MacroCurves::value(mMacroShape.load(), (float)mMacroPhaseRun);
+    return MacroCurves::value(mMacroShape.load(), (float)mMacroPhaseRun, mMacroDrawn);
 }
 
 float COMANCHE::lerp(const std::vector<float>& b, double pos, int loopEnd, int loopStart)
@@ -556,8 +556,9 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
-// Format v7: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)]
-//            [loopManual(int)] [loopStart(float)] [loopEnd(float)] [curveOn(int)] [curveShape(int)] [curveRate(int)] [curveFreeMs(float)] [params]
+// Format v8: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)]
+//            [loopManual(int)] [loopStart(float)] [loopEnd(float)] [curveOn(int)] [curveShape(int)] [curveRate(int)] [curveFreeMs(float)]
+//            [drawnCurve(float*128)] [params]   (v8; v7 has no drawnCurve)
 // Format v6: same without the MACRO curve
 // Format v5: same without the manual loop zone
 // Format v4: same without velDynamics
@@ -569,7 +570,8 @@ static constexpr int kSerializeMagicV3 = 0x434F4D33; // 'COM3'
 static constexpr int kSerializeMagicV4 = 0x434F4D34; // 'COM4'
 static constexpr int kSerializeMagicV5 = 0x434F4D35; // 'COM5'
 static constexpr int kSerializeMagicV6 = 0x434F4D36; // 'COM6'
-static constexpr int kSerializeMagic   = 0x434F4D37; // 'COM7'
+static constexpr int kSerializeMagicV7 = 0x434F4D37; // 'COM7'
+static constexpr int kSerializeMagic   = 0x434F4D38; // 'COM8'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
@@ -597,6 +599,7 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     chunk.Put(&curveShape);
     chunk.Put(&curveRate);
     chunk.Put(&curveMs);
+    for (int i = 0; i < MacroCurves::DrawnCurve::kPoints; i++) { const float v = mMacroDrawn.point(i); chunk.Put(&v); }
     return SerializeParams(chunk);
 }
 
@@ -614,7 +617,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
-    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV6 || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
+    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV7 || magic == kSerializeMagicV6 || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
         // v2 onwards: full restore
         pos = afterMagic;
         if (!stringFits(pos)) return startPos;
@@ -645,7 +648,8 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
-        const bool atLeastV6 = magic == kSerializeMagic || magic == kSerializeMagicV6;
+        const bool atLeastV7 = magic == kSerializeMagic || magic == kSerializeMagicV7;
+        const bool atLeastV6 = atLeastV7 || magic == kSerializeMagicV6;
         const bool atLeastV5 = atLeastV6 || magic == kSerializeMagicV5;
         const bool atLeastV4 = atLeastV5 || magic == kSerializeMagicV4;
         if (atLeastV4 || magic == kSerializeMagicV3) {
@@ -672,7 +676,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
             pos = chunk.Get(&zoneEnd, pos);
             if (manual) setLoopRegion(zoneStart, zoneEnd, true);
         }
-        if (magic == kSerializeMagic) {
+        if (atLeastV7) {
             int curveOn = 0, curveShape = (int)kDefaultCurveShape, curveRate = (int)kDefaultCurveRate; float curveMs = kDefaultCurveMs;
             pos = chunk.Get(&curveOn, pos);
             pos = chunk.Get(&curveShape, pos);
@@ -683,6 +687,13 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
             mMacroRate  = std::clamp(curveRate, 0, MacroCurves::kNumRates - 1);
             mMacroFreeMs = std::clamp(curveMs, MacroCurves::kFreeMinMs, MacroCurves::kFreeMaxMs);
         }
+        mMacroDrawn.clear();
+        if (magic == kSerializeMagic)
+            for (int i = 0; i < MacroCurves::DrawnCurve::kPoints; i++) {
+                float v = MacroCurves::DrawnCurve::kFlat;
+                pos = chunk.Get(&v, pos);
+                if (std::isfinite(v)) mMacroDrawn.setPoint(i, v);
+            }
     } else {
         // v1 (old saves): folder + params only, no sample
         if (!stringFits(pos)) return startPos;
@@ -958,6 +969,8 @@ void COMANCHE::loadSample(int idx)
     mMacroShape   = std::clamp((int)savedOr(kPresetCurveShapeKey, kDefaultCurveShape), 0, MacroCurves::kNumShapes - 1);
     mMacroRate    = std::clamp((int)savedOr(kPresetCurveRateKey, kDefaultCurveRate), 0, MacroCurves::kNumRates - 1);
     mMacroFreeMs  = std::clamp(savedOr(kPresetCurveMsKey, kDefaultCurveMs), MacroCurves::kFreeMinMs, MacroCurves::kFreeMaxMs);
+    for (int i = 0; i < MacroCurves::DrawnCurve::kPoints; i++)
+        mMacroDrawn.setPoint(i, savedOr(drawnPointKey(i).c_str(), MacroCurves::DrawnCurve::kFlat));
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
@@ -975,6 +988,8 @@ void COMANCHE::savePreset()
     vals[kPresetCurveShapeKey] = (float)mMacroShape.load();
     vals[kPresetCurveRateKey]  = (float)mMacroRate.load();
     vals[kPresetCurveMsKey]    = mMacroFreeMs.load();
+    if (!mMacroDrawn.isFlat())
+        for (int i = 0; i < MacroCurves::DrawnCurve::kPoints; i++) vals[drawnPointKey(i)] = mMacroDrawn.point(i);
     mPresets.save(vals);
 }
 
@@ -1004,8 +1019,17 @@ void COMANCHE::resetPresetForSample(int idx)
     }
 }
 
+// Presets are flat name -> value files, so the drawing takes one entry per point
+std::string COMANCHE::drawnPointKey(int i)
+{
+    char key[16];
+    snprintf(key, sizeof(key), "CurvePt%03d", i);
+    return key;
+}
+
 void COMANCHE::resetMacroCurve()
 {
+    mMacroDrawn.clear();
     mMacroCurveOn = false;
     mMacroShape   = (int)kDefaultCurveShape;
     mMacroRate    = (int)kDefaultCurveRate;

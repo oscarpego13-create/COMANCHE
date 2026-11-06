@@ -1,12 +1,18 @@
 #pragma once
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 
 // Shapes the MACRO can follow, and the note lengths it can sync to.
 // value() takes the position in the cycle (0..1) and returns the MACRO (0..1).
 namespace MacroCurves
 {
-    constexpr int kNumShapes = 16;
+    constexpr int kNumShapes = 17;
+    constexpr int kDrawnShape = 16;   // drawn by hand
+    // What the window offers, in order. Shape 14 is no longer offered, but saved sounds that use it keep it.
+    constexpr int kGridCells = 16;
+    constexpr int kGridShapes[kGridCells] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, kDrawnShape};
     constexpr int kNumRates  = 7;
     constexpr int kFreeRate  = 6;   // last rate: free running, in milliseconds
     constexpr float kFreeMinMs = 20.0f, kFreeMaxMs = 8000.0f;
@@ -28,7 +34,31 @@ namespace MacroCurves
     // Rises over a..b, holds, and falls back over the last stretch so the cycle joins up
     inline float rise(float a, float b, float x) { return ease(a, b, x) * (1.0f - ease(0.96f, 1.0f, x)); }
 
-    inline float value(int shape, float x)
+    // A hand-drawn cycle. The points wrap around, so the end of the cycle IS its start: the two can't
+    // differ. Atomic because the audio thread reads while the window draws.
+    struct DrawnCurve
+    {
+        static constexpr int kPoints = 128;
+        static constexpr float kFlat = 0.5f;
+        DrawnCurve() { clear(); }
+        void clear() { for (auto& p : mPoints) p.store(kFlat, std::memory_order_relaxed); }
+        float point(int i) const { return mPoints[(size_t)(((i % kPoints) + kPoints) % kPoints)].load(std::memory_order_relaxed); }
+        void setPoint(int i, float v) { mPoints[(size_t)(((i % kPoints) + kPoints) % kPoints)].store(std::clamp(v, 0.0f, 1.0f), std::memory_order_relaxed); }
+        float at(float x) const {
+            const float f = std::clamp(x, 0.0f, 1.0f) * kPoints;
+            const int i = (int)f;
+            const float a = point(i), b = point(i + 1);
+            return a + (f - (float)i) * (b - a);
+        }
+        bool isFlat() const {
+            for (int i = 0; i < kPoints; i++) if (point(i) != kFlat) return false;
+            return true;
+        }
+    private:
+        std::array<std::atomic<float>, kPoints> mPoints;
+    };
+
+    inline float value(int shape, float x, const DrawnCurve& drawn)
     {
         constexpr float kPi = 3.14159265f;
         switch (shape) {
@@ -50,6 +80,7 @@ namespace MacroCurves
             case 13: return x < 0.25f ? 1.0f : 0.0f;
             case 14: return rise(0.0f, 0.3f, std::fmod(x * 2.0f, 1.0f));
             case 15: return std::floor(x * 4.0f) / 3.0f;
+            case kDrawnShape: return drawn.at(x);
             default: return 0.0f;
         }
     }

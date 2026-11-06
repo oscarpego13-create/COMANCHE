@@ -776,8 +776,9 @@ class MacroCurvePanel final : public IControl
 {
 public:
     MacroCurvePanel(const IRECT& b, std::atomic<bool>& on, std::atomic<int>& shape, std::atomic<int>& rate,
-                    std::atomic<float>& freeMs, const std::atomic<float>& phase, std::function<void()> changed)
-        : IControl(b, kNoParameter), mOn(on), mShape(shape), mRate(rate), mFreeMs(freeMs), mPhase(phase),
+                    std::atomic<float>& freeMs, const std::atomic<float>& phase, MacroCurves::DrawnCurve& drawn,
+                    std::function<void()> changed)
+        : IControl(b, kNoParameter), mOn(on), mShape(shape), mRate(rate), mFreeMs(freeMs), mPhase(phase), mDrawn(drawn),
           mChanged(std::move(changed)) { Hide(true); }
     static constexpr float kW = 296.0f, kHead = 20.0f, kBtnH = 18.0f, kFreeH = 28.0f, kViewH = 46.0f, kCellH = 21.0f;
     static constexpr float kH = kHead + 5.0f + kBtnH + 4.0f + kBtnH + 5.0f + kFreeH + 3.0f + kViewH + 5.0f + 2*kCellH + 3.0f + 7.0f;
@@ -830,20 +831,32 @@ public:
         // The chosen curve large, with where it is now
         const IRECT v = viewRect();
         g.FillRoundRect(CT::bgPanel, v, 3.0f);
-        drawCurve(g, v.GetPadded(-5.0f), mShape.load(), on ? CT::fgPrimary : CT::textInk.WithOpacity(0.45f), 96, 2.0f);
+        drawCurve(g, v.GetPadded(-5.0f), mShape.load(), on ? CT::fgPrimary : CT::textInk.WithOpacity(0.45f), MacroCurves::DrawnCurve::kPoints, 2.0f);
+        const IRECT c = v.GetPadded(-5.0f);
+        if (mShape.load() == MacroCurves::kDrawnShape) {
+            // The cycle's start and end are one point: a dot at each side shows them moving together
+            const float y = c.B - mDrawn.point(0) * c.H();
+            g.FillCircle(CT::fgPrimary, c.L, y, 3.0f);
+            g.FillCircle(CT::fgPrimary, c.R, y, 3.0f);
+            if (mDrawn.isFlat())
+                g.DrawText(IText(8.5f, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Top), "Dibuja aqu\xC3\xAD la forma", IRECT(v.L, v.T+4, v.R, v.B));
+        }
         if (on) {
-            const IRECT c = v.GetPadded(-5.0f);
             const float ph = mPhase.load(), cx = c.L + ph * c.W();
             g.DrawLine(CT::horseGlow, cx, v.T+2, cx, v.B-2, nullptr, 1.5f);
-            g.FillCircle(CT::horseGlow, cx, c.B - MacroCurves::value(mShape.load(), ph) * c.H(), 3.5f);
+            g.FillCircle(CT::horseGlow, cx, c.B - MacroCurves::value(mShape.load(), ph, mDrawn) * c.H(), 3.5f);
         }
 
         const int shape = mShape.load();
-        for (int i = 0; i < MacroCurves::kNumShapes; i++) {
+        for (int i = 0; i < MacroCurves::kGridCells; i++) {
             const IRECT r = shapeCell(i);
-            const bool sel = i == shape;
+            const int id = MacroCurves::kGridShapes[i];
+            const bool sel = id == shape;
             g.FillRoundRect(sel ? CT::btnActive : CT::btnInactive, r, 2.0f);
-            drawCurve(g, r.GetPadded(-4.0f), i, sel ? CT::textLight : CT::textInk, 24, 1.3f);
+            if (id == MacroCurves::kDrawnShape)
+                g.DrawText(IText(15.0f, sel ? CT::textLight : CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle), "+", r);
+            else
+                drawCurve(g, r.GetPadded(-4.0f), id, sel ? CT::textLight : CT::textInk, 24, 1.3f);
         }
     }
     void OnMouseDown(float x, float y, const IMouseMod&) override {
@@ -851,12 +864,26 @@ public:
         if (switchRect().Contains(x, y)) { mOn = !mOn.load(); commit(); return; }
         for (int i = 0; i < MacroCurves::kNumRates; i++)
             if (rateCell(i).Contains(x, y)) { mRate = i; commit(); return; }
-        for (int i = 0; i < MacroCurves::kNumShapes; i++)
-            if (shapeCell(i).Contains(x, y)) { mShape = i; commit(); return; }
-        if (freeRow().GetPadded(0.0f, 0.0f, 0.0f, 2.0f).Contains(x, y)) { mDragFree = true; setFreeFromX(x); }
+        for (int i = 0; i < MacroCurves::kGridCells; i++)
+            if (shapeCell(i).Contains(x, y)) { mShape = MacroCurves::kGridShapes[i]; commit(); return; }
+        if (freeRow().GetPadded(0.0f, 0.0f, 0.0f, 2.0f).Contains(x, y)) { mDragFree = true; setFreeFromX(x); return; }
+        if (mShape.load() == MacroCurves::kDrawnShape && viewRect().Contains(x, y)) {
+            mDrawing = true; mLastPoint = -1;
+            drawAt(x, y);
+        }
     }
-    void OnMouseDrag(float x, float, float, float, const IMouseMod&) override { if (mDragFree) setFreeFromX(x); }
-    void OnMouseUp(float, float, const IMouseMod&) override { if (mDragFree) { mDragFree = false; if (mChanged) mChanged(); } }
+    void OnMouseDrag(float x, float y, float, float, const IMouseMod&) override {
+        if (mDragFree) setFreeFromX(x);
+        else if (mDrawing) drawAt(x, y);
+    }
+    void OnMouseUp(float, float, const IMouseMod&) override {
+        if (mDragFree) { mDragFree = false; if (mChanged) mChanged(); }
+        if (mDrawing)  { mDrawing = false;  if (mChanged) mChanged(); }
+    }
+    // Double click on the drawing starts it over
+    void OnMouseDblClick(float x, float y, const IMouseMod&) override {
+        if (mShape.load() == MacroCurves::kDrawnShape && viewRect().Contains(x, y)) { mDrawn.clear(); commit(); }
+    }
     void OnMouseOver(float x, float y, const IMouseMod&) override {
         const bool o = closeRect().Contains(x, y);
         if (o != mOverClose) { mOverClose = o; SetDirty(false); }
@@ -865,11 +892,25 @@ public:
 private:
     void setOpen(bool open) { Hide(!open); if (mOnVisibility) mOnVisibility(); }
     void commit() { if (mChanged) mChanged(); SetDirty(false); }
+    // Fills every point the mouse passed over since the last event, so a fast stroke leaves no gaps.
+    // Past the last point the index wraps to the first: the end of the cycle is its start.
+    void drawAt(float x, float y) {
+        using MacroCurves::DrawnCurve;
+        const IRECT c = viewRect().GetPadded(-5.0f);
+        const int p = (int)std::lround(std::clamp((x - c.L) / c.W(), 0.0f, 1.0f) * DrawnCurve::kPoints);
+        const float v = std::clamp((c.B - y) / c.H(), 0.0f, 1.0f);
+        if (mLastPoint < 0) { mLastPoint = p; mLastValue = v; }
+        const int steps = std::abs(p - mLastPoint), dir = p >= mLastPoint ? 1 : -1;
+        for (int i = 0; i <= steps; i++)
+            mDrawn.setPoint(mLastPoint + i*dir, steps ? mLastValue + (v - mLastValue) * (float)i / (float)steps : v);
+        mLastPoint = p; mLastValue = v;
+        SetDirty(false);
+    }
     void drawCurve(IGraphics& g, const IRECT& r, int shape, const IColor& c, int segs, float thick) {
-        float px = r.L, py = r.B - MacroCurves::value(shape, 0.0f) * r.H();
+        float px = r.L, py = r.B - MacroCurves::value(shape, 0.0f, mDrawn) * r.H();
         for (int i = 1; i <= segs; i++) {
             const float t = (float)i / (float)segs, x = r.L + t * r.W();
-            const float y = r.B - MacroCurves::value(shape, std::min(t, 0.9999f)) * r.H();
+            const float y = r.B - MacroCurves::value(shape, std::min(t, 0.9999f), mDrawn) * r.H();
             g.DrawLine(c, px, py, x, y, nullptr, thick);
             px = x; py = y;
         }
@@ -909,8 +950,11 @@ private:
     std::atomic<int>& mRate;
     std::atomic<float>& mFreeMs;
     const std::atomic<float>& mPhase;
+    MacroCurves::DrawnCurve& mDrawn;
     std::function<void()> mChanged, mOnVisibility;
-    bool mDragFree = false, mOverClose = false;
+    bool mDragFree = false, mDrawing = false, mOverClose = false;
+    int mLastPoint = -1;
+    float mLastValue = 0.0f;
 };
 
 // ─── Settings gear (left of the signature): opens / closes the SettingsPanel ─
@@ -1443,7 +1487,9 @@ public:
     static constexpr const char* kPresetCurveMsKey    = "CurveMs";
     std::atomic<int>   mMacroShape{(int)kDefaultCurveShape}, mMacroRate{(int)kDefaultCurveRate};
     std::atomic<float> mMacroFreeMs{kDefaultCurveMs};
+    MacroCurves::DrawnCurve mMacroDrawn;   // the "+" shape
     void resetMacroCurve();
+    static std::string drawnPointKey(int i);
     std::atomic<float> mMacroShown{-1.0f};   // where the curve has it now, < 0 when it isn't on a curve
     std::atomic<float> mMacroPhase{0.0f};
     double mMacroPhaseRun{0.0};
