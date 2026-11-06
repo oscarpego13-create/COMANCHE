@@ -4,6 +4,7 @@
 #include "IControls.h"
 #include "IPlugMidi.h"
 #include "Trace.h"
+#include "MacroCurves.h"
 
 #include <vector>
 #include <string>
@@ -133,9 +134,20 @@ public:
         : IControl(b, param), mLabel(lbl), mFill(fill),
           mIsMacro(isMacro), mLinkState(linkState), mModArray(modArray) {}
 
+    // shown: where a curve has the MACRO right now (< 0 when it isn't on a curve)
+    void setMacroShown(const std::atomic<float>* shown) { mMacroShown = shown; }
+    float macroNow() {
+        const float s = mMacroShown ? mMacroShown->load() : -1.0f;
+        return s >= 0.0f ? s : (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
+    }
+
     bool IsDirty() override {
+        if (mIsMacro && mMacroShown) {
+            const float s = mMacroShown->load();
+            if (std::abs(s - mLastShown) > 0.001f) { mLastShown = s; return true; }
+        }
         if (!mIsMacro && mLinkState && *mLinkState != 0) {
-            float m = (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
+            float m = macroNow();
             if (std::abs(m - mLastMacro) > 0.001f) { mLastMacro = m; return true; }
         }
         if (!mIsMacro && mModArray) {
@@ -155,6 +167,7 @@ public:
         g.DrawCircle(kNeedle, cx, kCy, kR-0.5f, nullptr, 1.8f);
 
         double baseNorm = GetParam() ? GetParam()->GetNormalized() : GetValue();
+        if (mIsMacro) baseNorm = macroNow();
         // Needle stays at actual param value — LFO shown as arc, not needle movement
         double angle = (-135.0 + baseNorm*270.0) * (M_PI/180.0);
         float  reach = kR - 0.5f;
@@ -168,7 +181,7 @@ public:
         // Macro link arc + track where it ends (LFO arc chains from here)
         double macroEndNorm = baseNorm;
         if (!mIsMacro && mLinkState && *mLinkState != 0) {
-            float macro = (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
+            float macro = macroNow();
             if (macro > 0.001f) {
                 macroEndNorm = std::clamp(baseNorm + macro*(double)(*mLinkState), 0.0, 1.0);
                 double startA = (-135.0 + baseNorm    *270.0)*(M_PI/180.0);
@@ -206,6 +219,7 @@ public:
         }
 
         WDL_String vs; KnobValueText(GetParam(), vs);
+        if (mIsMacro) vs.SetFormatted(16, "%d%%", (int)std::lround(baseNorm * 100.0));
         IText vt(mIsMacro?13.0f:UI::kValueSize, CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle);
         g.DrawText(vt, vs.Get(), IRECT(mRECT.L, kCy+kR+2, mRECT.R, kCy+kR+17));
         if (mLabel && mLabel[0]) {
@@ -228,6 +242,8 @@ public:
         SetValue(std::clamp(GetValue()+d*(m.S?0.002:0.01),0.0,1.0)); SetDirty(true);
     }
 private:
+    const std::atomic<float>* mMacroShown = nullptr;
+    float mLastShown = -2.0f;
     const char* mLabel; IColor mFill; bool mIsMacro; int* mLinkState;
     const float* mModArray;
     float mDY{0}; double mSV{0};
@@ -621,7 +637,7 @@ public:
         if (n > 0.0f) g.FillRoundRect(live ? CT::fgPrimary : CT::textInk.WithOpacity(0.35f), IRECT(bar.L, bar.T, bar.L + n*bar.W(), bar.B), 3.0f);
     }
     void OnMouseDown(float x, float y, const IMouseMod&) override {
-        if (closeRect().Contains(x, y)) { Hide(true); return; }
+        if (closeRect().Contains(x, y)) { setOpen(false); return; }
         if (timelineHit().Contains(x, y)) { grabTimeline(x); return; }
         for (int i : {kGlide, kVelocity})
             if (sliderRow(i).Contains(x, y)) { mDragSlider = i; setSliderFromX(i, x); return; }
@@ -651,12 +667,14 @@ public:
     void OnMouseDblClick(float x, float y, const IMouseMod&) override {
         if (timelineHit().Contains(x, y)) { mZone.reset(); if (mChanged) mChanged(); SetDirty(false); }
     }
-    void Toggle() { Hide(!IsHidden()); }
+    void Toggle() { setOpen(IsHidden()); }
+    void setOnVisibility(std::function<void()> fn) { mOnVisibility = std::move(fn); }
     static constexpr float kGlideMaxMs = 1000.0f;
     static constexpr float kW = 196.0f, kHead = 20.0f, kRow = 19.0f, kGlideH = 30.0f;
     static constexpr float kTimelineH = 15.0f;
     static constexpr float kH = kHead + 3.0f + 3*kRow + 4.0f + kTimelineH + 2*(7.0f + kGlideH) + 5.0f;
 private:
+    void setOpen(bool open) { Hide(!open); if (mOnVisibility) mOnVisibility(); }
     IRECT closeRect() const { return IRECT(mRECT.R-18, mRECT.T+3, mRECT.R-4, mRECT.T+17); }
     // Loop row and its timeline, then a gap, then the two playback rows
     IRECT row(int i) const {
@@ -713,8 +731,186 @@ private:
     int mDragSlider = -1;
     std::function<bool()> mLoopOn;
     std::function<void(bool)> mSetLoop;
-    std::function<void()> mChanged;
+    std::function<void()> mChanged, mOnVisibility;
     bool mOverClose = false;
+};
+
+// ─── Invisible layer over the MACRO: takes its right click, passes the rest to the knob ───
+// iPlug2 sends a right click on any control with a parameter straight to the host's context menu, so the
+// knob itself never sees it. This layer has no parameter, and tells the host about the gestures it forwards.
+class MacroClickLayer final : public IControl
+{
+public:
+    MacroClickLayer(const IRECT& b, IControl* knob, std::function<void()> onRightClick)
+        : IControl(b, kNoParameter), mKnob(knob), mOnRightClick(std::move(onRightClick)) {}
+    void Draw(IGraphics&) override {}
+    void OnMouseDown(float x, float y, const IMouseMod& m) override {
+        if (m.R) { mOnRightClick(); return; }
+        GetDelegate()->BeginInformHostOfParamChangeFromUI(kMacro);
+        mDragging = true;
+        mKnob->OnMouseDown(x, y, m);
+    }
+    void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& m) override {
+        if (mDragging) mKnob->OnMouseDrag(x, y, dX, dY, m);
+    }
+    void OnMouseUp(float x, float y, const IMouseMod& m) override {
+        if (!mDragging) return;
+        mDragging = false;
+        mKnob->OnMouseUp(x, y, m);
+        GetDelegate()->EndInformHostOfParamChangeFromUI(kMacro);
+    }
+    void OnMouseDblClick(float x, float y, const IMouseMod& m) override {
+        GetDelegate()->BeginInformHostOfParamChangeFromUI(kMacro);
+        mKnob->OnMouseDblClick(x, y, m);
+        GetDelegate()->EndInformHostOfParamChangeFromUI(kMacro);
+    }
+    void OnMouseWheel(float x, float y, const IMouseMod& m, float d) override { mKnob->OnMouseWheel(x, y, m, d); }
+private:
+    IControl* mKnob;
+    std::function<void()> mOnRightClick;
+    bool mDragging = false;
+};
+
+// ─── MACRO curve window: right click on the MACRO. Same look as the settings panel ───
+class MacroCurvePanel final : public IControl
+{
+public:
+    MacroCurvePanel(const IRECT& b, std::atomic<bool>& on, std::atomic<int>& shape, std::atomic<int>& rate,
+                    std::atomic<float>& freeMs, const std::atomic<float>& phase, std::function<void()> changed)
+        : IControl(b, kNoParameter), mOn(on), mShape(shape), mRate(rate), mFreeMs(freeMs), mPhase(phase),
+          mChanged(std::move(changed)) { Hide(true); }
+    static constexpr float kW = 296.0f, kHead = 20.0f, kBtnH = 18.0f, kFreeH = 28.0f, kViewH = 46.0f, kCellH = 21.0f;
+    static constexpr float kH = kHead + 5.0f + kBtnH + 4.0f + kBtnH + 5.0f + kFreeH + 3.0f + kViewH + 5.0f + 2*kCellH + 3.0f + 7.0f;
+    void Toggle() { setOpen(IsHidden()); }
+    void setOnVisibility(std::function<void()> fn) { mOnVisibility = std::move(fn); }
+    // The cursor moves while the curve runs
+    bool IsDirty() override { return (!IsHidden() && mOn.load()) || IControl::IsDirty(); }
+
+    void Draw(IGraphics& g) override {
+        g.FillRoundRect(CT::bgPrimary, mRECT, 4.0f);
+        g.DrawRoundRect(CT::fgPrimary, mRECT, 4.0f, nullptr, 1.5f);
+        const IText title(9.0f, CT::textInk, "RobotoMono", EAlign::Near, EVAlign::Middle);
+        g.DrawText(title, "MOVIMIENTO DEL MACRO", IRECT(mRECT.L+8, mRECT.T, mRECT.R, mRECT.T+kHead));
+        const IRECT x = closeRect();
+        const IColor xc = mOverClose ? CT::fgPrimary : CT::textInk;
+        g.DrawLine(xc, x.L+4, x.T+4, x.R-4, x.B-4, nullptr, 1.6f);
+        g.DrawLine(xc, x.R-4, x.T+4, x.L+4, x.B-4, nullptr, 1.6f);
+        g.DrawLine(CT::btnInactive, mRECT.L+6, mRECT.T+kHead, mRECT.R-6, mRECT.T+kHead, nullptr, 1.0f);
+
+        const bool on = mOn.load();
+        const IRECT sw = switchRect();
+        g.FillRoundRect(on ? CT::btnActive : CT::btnInactive, sw, 2.0f);
+        g.DrawText(IText(9.0f, on ? CT::textLight : CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle),
+                   on ? "ACTIVADO" : "ACTIVAR", sw);
+        const int rate = mRate.load();
+        const IText hint(8.5f, CT::textInk, "RobotoMono", EAlign::Far, EVAlign::Middle);
+        g.DrawText(hint, rate == MacroCurves::kFreeRate ? "libre, sin tempo" : "sincronizado al tempo",
+                   IRECT(sw.R, sw.T, mRECT.R-8, sw.B));
+
+        for (int i = 0; i < MacroCurves::kNumRates; i++) {
+            const IRECT r = rateCell(i);
+            const bool sel = i == rate;
+            g.FillRoundRect(sel ? CT::btnActive : CT::btnInactive, r, 2.0f);
+            g.DrawText(IText(9.0f, sel ? CT::textLight : CT::textInk, "RobotoMono", EAlign::Center, EVAlign::Middle),
+                       MacroCurves::rateLabel(i), r);
+        }
+
+        // Free time: label + ms, then a bar to drag. Dimmed unless MS is chosen.
+        const bool free = rate == MacroCurves::kFreeRate;
+        const IColor ink = free ? CT::textInk : CT::btnInactive;
+        const IRECT fr = freeRow();
+        WDL_String ms; ms.SetFormatted(16, "%d ms", (int)std::lround(mFreeMs.load()));
+        g.DrawText(IText(9.0f, ink, "RobotoMono", EAlign::Near, EVAlign::Middle), "Tiempo libre", IRECT(fr.L, fr.T, fr.R, fr.T+14));
+        g.DrawText(IText(9.0f, ink, "RobotoMono", EAlign::Far, EVAlign::Middle), ms.Get(), IRECT(fr.L, fr.T, fr.R, fr.T+14));
+        const IRECT bar = freeBar();
+        g.FillRoundRect(CT::btnInactive, bar, 3.0f);
+        const float n = freeNorm();
+        if (n > 0.0f) g.FillRoundRect(free ? CT::fgPrimary : CT::textInk.WithOpacity(0.35f), IRECT(bar.L, bar.T, bar.L + n*bar.W(), bar.B), 3.0f);
+
+        // The chosen curve large, with where it is now
+        const IRECT v = viewRect();
+        g.FillRoundRect(CT::bgPanel, v, 3.0f);
+        drawCurve(g, v.GetPadded(-5.0f), mShape.load(), on ? CT::fgPrimary : CT::textInk.WithOpacity(0.45f), 96, 2.0f);
+        if (on) {
+            const IRECT c = v.GetPadded(-5.0f);
+            const float ph = mPhase.load(), cx = c.L + ph * c.W();
+            g.DrawLine(CT::horseGlow, cx, v.T+2, cx, v.B-2, nullptr, 1.5f);
+            g.FillCircle(CT::horseGlow, cx, c.B - MacroCurves::value(mShape.load(), ph) * c.H(), 3.5f);
+        }
+
+        const int shape = mShape.load();
+        for (int i = 0; i < MacroCurves::kNumShapes; i++) {
+            const IRECT r = shapeCell(i);
+            const bool sel = i == shape;
+            g.FillRoundRect(sel ? CT::btnActive : CT::btnInactive, r, 2.0f);
+            drawCurve(g, r.GetPadded(-4.0f), i, sel ? CT::textLight : CT::textInk, 24, 1.3f);
+        }
+    }
+    void OnMouseDown(float x, float y, const IMouseMod&) override {
+        if (closeRect().Contains(x, y)) { setOpen(false); return; }
+        if (switchRect().Contains(x, y)) { mOn = !mOn.load(); commit(); return; }
+        for (int i = 0; i < MacroCurves::kNumRates; i++)
+            if (rateCell(i).Contains(x, y)) { mRate = i; commit(); return; }
+        for (int i = 0; i < MacroCurves::kNumShapes; i++)
+            if (shapeCell(i).Contains(x, y)) { mShape = i; commit(); return; }
+        if (freeRow().GetPadded(0.0f, 0.0f, 0.0f, 2.0f).Contains(x, y)) { mDragFree = true; setFreeFromX(x); }
+    }
+    void OnMouseDrag(float x, float, float, float, const IMouseMod&) override { if (mDragFree) setFreeFromX(x); }
+    void OnMouseUp(float, float, const IMouseMod&) override { if (mDragFree) { mDragFree = false; if (mChanged) mChanged(); } }
+    void OnMouseOver(float x, float y, const IMouseMod&) override {
+        const bool o = closeRect().Contains(x, y);
+        if (o != mOverClose) { mOverClose = o; SetDirty(false); }
+    }
+    void OnMouseOut() override { mOverClose = false; SetDirty(false); }
+private:
+    void setOpen(bool open) { Hide(!open); if (mOnVisibility) mOnVisibility(); }
+    void commit() { if (mChanged) mChanged(); SetDirty(false); }
+    void drawCurve(IGraphics& g, const IRECT& r, int shape, const IColor& c, int segs, float thick) {
+        float px = r.L, py = r.B - MacroCurves::value(shape, 0.0f) * r.H();
+        for (int i = 1; i <= segs; i++) {
+            const float t = (float)i / (float)segs, x = r.L + t * r.W();
+            const float y = r.B - MacroCurves::value(shape, std::min(t, 0.9999f)) * r.H();
+            g.DrawLine(c, px, py, x, y, nullptr, thick);
+            px = x; py = y;
+        }
+    }
+    IRECT closeRect() const { return IRECT(mRECT.R-18, mRECT.T+3, mRECT.R-4, mRECT.T+17); }
+    IRECT switchRect() const { const float t = mRECT.T + kHead + 5.0f; return IRECT(mRECT.L+8, t, mRECT.L+98, t+kBtnH); }
+    IRECT rateCell(int i) const {
+        const float t = mRECT.T + kHead + 5.0f + kBtnH + 4.0f, w = (mRECT.W() - 16.0f + 3.0f) / MacroCurves::kNumRates;
+        const float l = mRECT.L + 8.0f + i*w;
+        return IRECT(l, t, l+w-3.0f, t+kBtnH);
+    }
+    IRECT freeRow() const {
+        const float t = mRECT.T + kHead + 5.0f + kBtnH + 4.0f + kBtnH + 5.0f;
+        return IRECT(mRECT.L+8, t, mRECT.R-8, t+kFreeH);
+    }
+    IRECT freeBar() const { const IRECT r = freeRow(); return IRECT(r.L, r.T+16, r.R, r.T+23); }
+    IRECT viewRect() const { const float t = freeRow().B + 3.0f; return IRECT(mRECT.L+8, t, mRECT.R-8, t+kViewH); }
+    IRECT shapeCell(int i) const {
+        const float t = viewRect().B + 5.0f + (i/8)*(kCellH+3.0f), w = (mRECT.W() - 16.0f + 3.0f) / 8.0f;
+        const float l = mRECT.L + 8.0f + (i%8)*w;
+        return IRECT(l, t, l+w-3.0f, t+kCellH);
+    }
+    // Square law between 20 ms and 8 s: finer steps at the short times
+    float freeNorm() const {
+        using namespace MacroCurves;
+        return std::sqrt(std::clamp((mFreeMs.load() - kFreeMinMs) / (kFreeMaxMs - kFreeMinMs), 0.0f, 1.0f));
+    }
+    void setFreeFromX(float x) {
+        using namespace MacroCurves;
+        const IRECT b = freeBar();
+        const float n = std::clamp((x - b.L) / b.W(), 0.0f, 1.0f);
+        mFreeMs = std::round(kFreeMinMs + n * n * (kFreeMaxMs - kFreeMinMs));
+        SetDirty(false);
+    }
+    std::atomic<bool>& mOn;
+    std::atomic<int>& mShape;
+    std::atomic<int>& mRate;
+    std::atomic<float>& mFreeMs;
+    const std::atomic<float>& mPhase;
+    std::function<void()> mChanged, mOnVisibility;
+    bool mDragFree = false, mOverClose = false;
 };
 
 // ─── Settings gear (left of the signature): opens / closes the SettingsPanel ─
@@ -1068,8 +1264,8 @@ private:
 class HorseScene final : public IControl
 {
 public:
-    HorseScene(const IRECT& band, const IRECT& horse, const IBitmap& sheet)
-        : IControl(band, kNoParameter), mHorse(horse), mSheet(sheet)
+    HorseScene(const IRECT& band, const IRECT& horse, const IBitmap& sheet, const std::atomic<float>& macroShown)
+        : IControl(band, kNoParameter), mHorse(horse), mSheet(sheet), mMacroShown(macroShown)
     { SetIgnoreMouse(true); mLast = std::chrono::steady_clock::now(); }
 
     bool IsDirty() override { return true; }   // always animating: the horse walks even at MACRO 0
@@ -1143,7 +1339,8 @@ private:
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::min(0.1f, std::chrono::duration<float>(now - mLast).count());
         mLast = now;
-        const float m = (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
+        const float shown = mMacroShown.load();
+        const float m = shown >= 0.0f ? shown : (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
         mSmooth += (1.0f - std::exp(-dt / 0.05f)) * (m - mSmooth);   // same 50 ms smoothing as the DSP
         static const Gait kGaits[3] = { {0.64f, 22.0f, 0.7f, 1.0f}, {0.42f, 34.0f, 1.2f, 1.6f}, {0.30f, 52.0f, 1.8f, 2.6f} };
         static const float lo[3] = {0.0f, 0.34f, 0.67f}, hi[3] = {0.34f, 0.67f, 1.0f};
@@ -1164,6 +1361,7 @@ private:
     IRECT mHorse;
     IBitmap mSheet;
     std::chrono::steady_clock::time_point mLast;
+    const std::atomic<float>& mMacroShown;
     float mSmooth{0.0f}, mPhase{0.0f}, mScroll{0.0f}, mWind{0.0f};
     int mGait{0};
 };
@@ -1231,6 +1429,14 @@ public:
     static constexpr const char* kPresetLoopEndKey   = "LoopEnd";
     std::atomic<bool> mMono{false};
     std::atomic<float> mGlideMs{80.0f};   // portamento between legato notes in mono + loop (settings only)
+    // MACRO on a curve (right click on the MACRO). The knob's own value stays untouched underneath.
+    std::atomic<bool>  mMacroCurveOn{false};
+    std::atomic<int>   mMacroShape{2}, mMacroRate{2};
+    std::atomic<float> mMacroFreeMs{500.0f};
+    std::atomic<float> mMacroShown{-1.0f};   // where the curve has it now, < 0 when it isn't on a curve
+    std::atomic<float> mMacroPhase{0.0f};
+    double mMacroPhaseRun{0.0};
+    float  macroCurveValue(int nFrames);
     std::atomic<float> mVelDynamics{1.0f};   // how much key velocity shapes note level: 1 = fully, 0 = always full level
     void setLoopEnabled(bool on);
     void savePersistentState() const;

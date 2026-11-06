@@ -24,18 +24,18 @@ void ComanacheReverb::prepare(double sampleRate)
     for (int i=0;i<kA;i++){apL[i].resize((int)(aL[i]*sc));  apR[i].resize((int)(aR[i]*sc));}
 }
 
-void ComanacheReverb::process(float* L, float* R, int n, float amount, float decaySec)
+void ComanacheReverb::process(float* L, float* R, int n, float& amount, float target, float glide, float decaySec, bool keepRunning)
 {
-    if (amount <= 0.0f) return;
+    if (target <= 0.0f && amount < 0.0001f && !keepRunning) { amount = 0.0f; return; }
     // RT60 from requested decay (longest comb = 1617/44100 s at any SR)
     static constexpr float kLongCombSec = 1617.0f / 44100.0f;
     float logFb = -3.0f * kLongCombSec / std::max(0.05f, decaySec);
     const float fb   = std::pow(10.0f, logFb);
     const float damp = 0.30f;
-    const float wet  = amount;
-    const float dry  = 1.0f - amount;
 
     for (int i = 0; i < n; i++) {
+        amount += glide * (target - amount);
+        const float wet = amount, dry = 1.0f - amount;
         float inL = L[i], inR = R[i];
         float input = (inL + inR) * 0.015f;
         float oL=0, oR=0;
@@ -71,6 +71,10 @@ void EffectsChain::prepare(double sampleRate, int)
     // Start at the current values so a reset doesn't sweep from the defaults
     mSmoothDistAmount=params.distAmount; mSmoothMacroMod=params.macroModAmount;
     mSmoothVol=params.outputVol;
+    mSmoothReverb=params.reverbAmount; mSmoothDelayMix=params.delayMix;
+    mSmoothFeedback=params.delayFeedback; mSmoothChorus=params.chorusAmount;
+    mixGlide = 1.0f - std::exp(-1.0f / (float)(sr * 0.010));              // 10 ms per-sample glide
+    distGlide = 1.0f - std::exp(-(float)kFilterSub / (float)(sr * 0.030));
     volSmoothCoeff = 1.0f - std::exp(-1.0f / (float)(sr * 0.015));   // 15 ms per-sample glide
     mSmoothHpFreq=params.hpFreq; mSmoothLpFreq=params.lpFreq;
     mSmoothDlcFreq=params.delayLowcut; mSmoothDhcFreq=params.delayHighcut;
@@ -128,31 +132,35 @@ void EffectsChain::process(float* outL, float* outR, int n)
     {
         const float blockDur = (float)n / (float)sr;
         const float alpha = 1.0f - std::exp(-blockDur / 0.030f);
-        mSmoothDistAmount += alpha * (params.distAmount    - mSmoothDistAmount);
         mSmoothMacroMod   += alpha * (params.macroModAmount - mSmoothMacroMod);
     }
 
     // 1. Reverb
-    reverb.process(outL, outR, n, params.reverbAmount, params.reverbDecay);
+    reverb.process(outL, outR, n, mSmoothReverb, params.reverbAmount, mixGlide, params.reverbDecay, params.keepRunning);
 
     // 2. Distortion + gain compensation + tape HF rolloff
-    if (mSmoothDistAmount > 0.0001f) {
+    if (mSmoothDistAmount > 0.0001f || params.distAmount > 0.0001f) {
         // Knob response: the drive follows amount^2.2 and the saturated signal is blended in over the
         // first 35 % of the knob, so low settings stay clean and the grit shows up around 30-40 %.
-        // At 100 % it is the same full drive as before.
-        const float amt   = std::pow(mSmoothDistAmount, 2.2f);
-        const float s     = std::min(1.0f, mSmoothDistAmount / 0.35f);
-        const float wet   = s * s * (3.0f - 2.0f * s);
-        const float comp  = 1.0f / (1.0f + amt * 4.0f);
-        for (int i=0;i<n;i++) {
-            float dL, dR;
-            switch (params.distMode) {
-                case 1: dL=distTape(outL[i],amt); dR=distTape(outR[i],amt); break;
-                case 2: dL=distTube(outL[i],amt); dR=distTube(outR[i],amt); break;
-                default:dL=distClip(outL[i],amt); dR=distClip(outR[i],amt); break;
+        // At 100 % it is the same full drive as before. Updated per sub-block: the MACRO can move it fast.
+        float amt = 0.0f;
+        for (int c0 = 0; c0 < n; c0 += kFilterSub) {
+            const int c1 = std::min(n, c0 + kFilterSub);
+            mSmoothDistAmount += distGlide * (params.distAmount - mSmoothDistAmount);
+            amt = std::pow(mSmoothDistAmount, 2.2f);
+            const float s     = std::min(1.0f, mSmoothDistAmount / 0.35f);
+            const float wet   = s * s * (3.0f - 2.0f * s);
+            const float comp  = 1.0f / (1.0f + amt * 4.0f);
+            for (int i=c0;i<c1;i++) {
+                float dL, dR;
+                switch (params.distMode) {
+                    case 1: dL=distTape(outL[i],amt); dR=distTape(outR[i],amt); break;
+                    case 2: dL=distTube(outL[i],amt); dR=distTube(outR[i],amt); break;
+                    default:dL=distClip(outL[i],amt); dR=distClip(outR[i],amt); break;
+                }
+                outL[i] += wet * (dL * comp - outL[i]);
+                outR[i] += wet * (dR * comp - outR[i]);
             }
-            outL[i] += wet * (dL * comp - outL[i]);
-            outR[i] += wet * (dR * comp - outR[i]);
         }
         // TAPE: progressive HF loss (cutoff falls from 20kHz→3kHz as dist increases)
         if (params.distMode == 1) {
@@ -176,7 +184,7 @@ void EffectsChain::process(float* outL, float* outR, int n)
         const float vibDepth = mSmoothMacroMod * 0.0003f * (float)sr;
         const float vibInc   = kTwoPiF * 0.28f / (float)sr;
 
-        const float fb = std::clamp(params.delayFeedback, 0.0f, 0.97f);
+        const float fbTarget = std::clamp(params.delayFeedback, 0.0f, 0.97f);
         for (int c0 = 0; c0 < n; c0 += kFilterSub) {
           const int c1 = std::min(n, c0 + kFilterSub);
           mSmoothDlcFreq = smoothFreq(mSmoothDlcFreq, params.delayLowcut,  filterSmoothCoeff);
@@ -190,6 +198,9 @@ void EffectsChain::process(float* outL, float* outR, int n)
           const float bcHold = std::max(1.0f, (float)sr / bcSR);
 
           for (int i=c0;i<c1;i++) {
+            mSmoothFeedback += mixGlide * (fbTarget - mSmoothFeedback);
+            mSmoothDelayMix += mixGlide * (params.delayMix - mSmoothDelayMix);
+            const float fb = mSmoothFeedback;
             // Vibrato: slowly wobble read position
             float vib = vibDepth * std::sin(vibratoPhase);
             vibratoPhase += vibInc;
@@ -213,26 +224,27 @@ void EffectsChain::process(float* outL, float* outR, int n)
             float fbR = dlcR.process(dhcR.process(bcHoldL * fb));
             delBufL[delPos] = outL[i] + fbL;
             delBufR[delPos] = outR[i] + fbR;
-            outL[i] += outWL * params.delayMix;
-            outR[i] += outWR * params.delayMix;
+            outL[i] += outWL * mSmoothDelayMix;
+            outR[i] += outWR * mSmoothDelayMix;
             if (++delPos >= delSize) delPos = 0;
           }
         }
     }
 
     // 4. Chorus
-    if (params.chorusAmount > 0.0f) {
+    if (params.chorusAmount > 0.0f || mSmoothChorus > 0.0001f || params.keepRunning) {
         const float center = 5.0f*0.001f*(float)sr;
         const float depth  = 2.0f*0.001f*(float)sr;
         const float inc    = kTwoPiF * 0.5f / (float)sr;
         for (int i=0;i<n;i++) {
+            mSmoothChorus += mixGlide * (params.chorusAmount - mSmoothChorus);
             choBufL[choPos]=outL[i]; choBufR[choPos]=outR[i];
             float mL = center + depth*std::sin(choPhase);
             float mR = center + depth*std::sin(choPhase + (float)M_PI);
             float wL = readBuf(choBufL, choPos, mL);
             float wR = readBuf(choBufR, choPos, mR);
-            outL[i] = outL[i]*(1.0f-params.chorusAmount) + wL*params.chorusAmount;
-            outR[i] = outR[i]*(1.0f-params.chorusAmount) + wR*params.chorusAmount;
+            outL[i] = outL[i]*(1.0f-mSmoothChorus) + wL*mSmoothChorus;
+            outR[i] = outR[i]*(1.0f-mSmoothChorus) + wR*mSmoothChorus;
             if (++choPos >= choSize) choPos = 0;
             choPhase += inc;
             if (choPhase > kTwoPiF) choPhase -= kTwoPiF;

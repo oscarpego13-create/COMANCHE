@@ -178,7 +178,7 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         const float hx = hL + ((hR - hL) - HORSE_FRAME_W) * 0.5f;
         const IRECT horse(hx, band.B - 2.0f - HORSE_FRAME_H, hx + HORSE_FRAME_W, band.B - 2.0f);
         ctrace("layout: loading horse bitmap");
-        g->AttachControl(new HorseScene(band, horse, g->LoadBitmap(HORSE_FN)));
+        g->AttachControl(new HorseScene(band, horse, g->LoadBitmap(HORSE_FN), mMacroShown));
         ctrace("layout: horse ok");
 
         // COMANCHE logo centred over the horse (artwork from the pack cover)
@@ -188,8 +188,15 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             g->AttachControl(new LogoControl(IRECT(lx, ly, lx+lw, ly+lh), g->LoadBitmap(TITLE_FN)));
         }
 
-        g->AttachControl(new ComanacheKnob(IRECT(mX - mW*0.5f, rT+8, mX + mW*0.5f, rT+8+mH),
-                                           kMacro, "MACRO", CT::knobGold, true));
+        // Right click on the MACRO opens its curve window, beside it so the knob stays in view
+        const float curveR = mX - mW*0.5f - 6.0f;
+        auto* macroCurve = new MacroCurvePanel(IRECT(std::max(panelW + 4.0f, curveR - MacroCurvePanel::kW), 6.0f, curveR, 6.0f + MacroCurvePanel::kH),
+            mMacroCurveOn, mMacroShape, mMacroRate, mMacroFreeMs, mMacroPhase, [this] { markStateDirty(); });
+        auto* macroKnob = new ComanacheKnob(IRECT(mX - mW*0.5f, rT+8, mX + mW*0.5f, rT+8+mH),
+                                            kMacro, "MACRO", CT::knobGold, true);
+        macroKnob->setMacroShown(&mMacroShown);
+        g->AttachControl(macroKnob);
+        g->AttachControl(new MacroClickLayer(macroKnob->GetRECT(), macroKnob, [macroCurve] { macroCurve->Toggle(); }));
 
         // ── Effect boxes ──────────────────────────────────────────────────────
         g->AttachControl(new IPanelControl(boxReverb, CT::boxReverb));
@@ -214,7 +221,9 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
             // A label sits below the value, past the knob's own area: grow the control so it isn't clipped
             const float labelBottom = 4.0f + 0.7f*kw + UI::kLabelGap + 14.0f;
             const IRECT drawR = (lbl && lbl[0]) ? IRECT(r.L, r.T, r.R, r.T + std::max(kh, labelBottom)) : r;
-            g->AttachControl(new ComanacheKnob(drawR, param, lbl, fill, false, &mMacroLink[param], mParamMod));
+            auto* knob = new ComanacheKnob(drawR, param, lbl, fill, false, &mMacroLink[param], mParamMod);
+            knob->setMacroShown(&mMacroShown);
+            g->AttachControl(knob);
             g->AttachControl(new MacroLinkButton(IRECT(r.R-10, r.T, r.R, r.T+10), mMacroLink[param],
                                                  [this]() { markStateDirty(); }));
         };
@@ -263,6 +272,13 @@ COMANCHE::COMANCHE(const InstanceInfo& info)
         }
 
         g->AttachControl(settings);
+        g->AttachControl(macroCurve);
+        // iPlug2's dirty-rect merging cuts the horse band down to one side of a panel crossing it, and
+        // everything past the panel (the MACRO) stops redrawing. Strict drawing skips that merge; it
+        // repaints more, so it is only on while a panel is open.
+        auto panelsChanged = [g, settings, macroCurve] { g->SetStrictDrawing(!settings->IsHidden() || !macroCurve->IsHidden()); };
+        settings->setOnVisibility(panelsChanged);
+        macroCurve->setOnVisibility(panelsChanged);
         ctrace("layout end (%d controls)", g->NControls());
     };
 #endif
@@ -351,15 +367,18 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     }
     if (sampleLock.owns_lock()) sampleLock.unlock();
 
-    const float macroRaw = (float)GetParam(kMacro)->GetNormalized();
+    const bool macroOnCurve = mMacroCurveOn.load();
+    const float macroRaw = macroOnCurve ? macroCurveValue(n) : (float)GetParam(kMacro)->GetNormalized();
     // Smooth macro before applying to DSP — prevents zipper noise and pitch jumps
     static constexpr float kTwoPi = 6.28318530718f;
     const float blockDur = (float)n / (float)GetSampleRate();
     {
-        const float a = 1.0f - std::exp(-blockDur / 0.050f); // 50ms tau
+        // 50 ms tau by hand; a curve keeps its shape (the effects glide the rest)
+        const float a = 1.0f - std::exp(-blockDur / (macroOnCurve ? 0.004f : 0.050f));
         mSmoothMacro += a * (macroRaw - mSmoothMacro);
     }
     const float macro = mSmoothMacro;
+    mMacroShown = macroOnCurve ? macro : -1.0f;
 
     // Update slow per-param LFO modulation (amplitude = macro * 0.07 normalized range)
     for (int i = 0; i < kNumParams; i++) {
@@ -402,6 +421,7 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
     float dBVol      = applyMacro(kOutputVol);  // dB, -60..+6
     ep.outputVol     = (dBVol <= -59.0f) ? 0.0f : std::pow(10.0f, dBVol / 20.0f);
     ep.macroModAmount = macro;
+    ep.keepRunning   = macroOnCurve;
     ep.bpm           = GetTempo() > 0.0 ? GetTempo() : 120.0;
 
     mFX.setParameters(ep);
@@ -422,6 +442,26 @@ void COMANCHE::ProcessBlock(sample** /*inputs*/, sample** outputs, int nFrames)
 // ─── Voice management ────────────────────────────────────────────────────────
 
 // Inside a loop the sample after the last one is the loop start, not what follows the loop end
+// Where the curve is at the end of this block. In sync with the transport running, the position comes
+// from the host so the MACRO stays on the grid through jumps and loops; otherwise it runs on its own,
+// at the project tempo or the free time in ms.
+float COMANCHE::macroCurveValue(int nFrames)
+{
+    const int rate = std::clamp(mMacroRate.load(), 0, MacroCurves::kNumRates - 1);
+    const double sr = GetSampleRate(), blockSec = nFrames / sr;
+    const double bpm = GetTempo() > 0.0 ? GetTempo() : 120.0;
+    if (rate == MacroCurves::kFreeRate) {
+        mMacroPhaseRun += blockSec * 1000.0 / std::max(1.0f, mMacroFreeMs.load());
+    } else {
+        const double beats = MacroCurves::rateBeats(rate), blockBeats = blockSec * bpm / 60.0;
+        if (GetTransportIsRunning() && GetPPQPos() >= 0.0) mMacroPhaseRun = (GetPPQPos() + blockBeats) / beats;
+        else mMacroPhaseRun += blockBeats / beats;
+    }
+    mMacroPhaseRun -= std::floor(mMacroPhaseRun);
+    mMacroPhase = (float)mMacroPhaseRun;
+    return MacroCurves::value(mMacroShape.load(), (float)mMacroPhaseRun);
+}
+
 float COMANCHE::lerp(const std::vector<float>& b, double pos, int loopEnd, int loopStart)
 {
     int i = (int)pos;
@@ -516,8 +556,9 @@ void COMANCHE::noteOff(int note)
 }
 
 // ─── State serialization ─────────────────────────────────────────────────────
-// Format v6: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)]
-//            [loopManual(int)] [loopStart(float)] [loopEnd(float)] [params]
+// Format v7: [magic(int)] [folder(str)] [samplePath(str)] [macroLink(int*kNumParams)] [loop(int)] [mono(int)] [glideMs(float)] [velDynamics(float)]
+//            [loopManual(int)] [loopStart(float)] [loopEnd(float)] [curveOn(int)] [curveShape(int)] [curveRate(int)] [curveFreeMs(float)] [params]
+// Format v6: same without the MACRO curve
 // Format v5: same without the manual loop zone
 // Format v4: same without velDynamics
 // Format v3: same without glide
@@ -527,7 +568,8 @@ static constexpr int kSerializeMagicV2 = 0x434F4D32; // 'COM2'
 static constexpr int kSerializeMagicV3 = 0x434F4D33; // 'COM3'
 static constexpr int kSerializeMagicV4 = 0x434F4D34; // 'COM4'
 static constexpr int kSerializeMagicV5 = 0x434F4D35; // 'COM5'
-static constexpr int kSerializeMagic   = 0x434F4D36; // 'COM6'
+static constexpr int kSerializeMagicV6 = 0x434F4D36; // 'COM6'
+static constexpr int kSerializeMagic   = 0x434F4D37; // 'COM7'
 
 bool COMANCHE::SerializeState(IByteChunk& chunk) const
 {
@@ -549,6 +591,12 @@ bool COMANCHE::SerializeState(IByteChunk& chunk) const
     chunk.Put(&manual);
     chunk.Put(&zoneStart);
     chunk.Put(&zoneEnd);
+    const int curveOn = mMacroCurveOn ? 1 : 0, curveShape = mMacroShape.load(), curveRate = mMacroRate.load();
+    const float curveMs = mMacroFreeMs.load();
+    chunk.Put(&curveOn);
+    chunk.Put(&curveShape);
+    chunk.Put(&curveRate);
+    chunk.Put(&curveMs);
     return SerializeParams(chunk);
 }
 
@@ -558,7 +606,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
     int magic = 0;
     int afterMagic = chunk.Get(&magic, pos);
 
-    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
+    if (afterMagic > pos && (magic == kSerializeMagic || magic == kSerializeMagicV6 || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3 || magic == kSerializeMagicV2)) {
         // v2 / v3: full restore
         pos = afterMagic;
         WDL_String folder;
@@ -587,29 +635,43 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
         if (!mSamplePath.empty()) mPresets.onSampleLoaded(mSamplePath);
 
         for (int i = 0; i < kNumParams; i++) pos = chunk.Get(&mMacroLink[i], pos);
-        if (magic == kSerializeMagic || magic == kSerializeMagicV5 || magic == kSerializeMagicV4 || magic == kSerializeMagicV3) {
+        const bool atLeastV6 = magic == kSerializeMagic || magic == kSerializeMagicV6;
+        const bool atLeastV5 = atLeastV6 || magic == kSerializeMagicV5;
+        const bool atLeastV4 = atLeastV5 || magic == kSerializeMagicV4;
+        if (atLeastV4 || magic == kSerializeMagicV3) {
             int loop = 1, mono = 0;
             pos = chunk.Get(&loop, pos);
             pos = chunk.Get(&mono, pos);
             mMono = mono != 0;
             setLoopEnabled(loop != 0);
         }
-        if (magic == kSerializeMagic || magic == kSerializeMagicV5 || magic == kSerializeMagicV4) {
+        if (atLeastV4) {
             float glide = 80.0f;
             pos = chunk.Get(&glide, pos);
             mGlideMs = std::clamp(glide, 0.0f, SettingsPanel::kGlideMaxMs);
         }
-        if (magic == kSerializeMagic || magic == kSerializeMagicV5) {
+        if (atLeastV5) {
             float dyn = 1.0f;
             pos = chunk.Get(&dyn, pos);
             mVelDynamics = std::clamp(dyn, 0.0f, 1.0f);
         }
-        if (magic == kSerializeMagic) {
+        if (atLeastV6) {
             int manual = 0; float zoneStart = 0.5f, zoneEnd = 1.0f;
             pos = chunk.Get(&manual, pos);
             pos = chunk.Get(&zoneStart, pos);
             pos = chunk.Get(&zoneEnd, pos);
             if (manual) setLoopRegion(zoneStart, zoneEnd, true);
+        }
+        if (magic == kSerializeMagic) {
+            int curveOn = 0, curveShape = 2, curveRate = 2; float curveMs = 500.0f;
+            pos = chunk.Get(&curveOn, pos);
+            pos = chunk.Get(&curveShape, pos);
+            pos = chunk.Get(&curveRate, pos);
+            pos = chunk.Get(&curveMs, pos);
+            mMacroCurveOn = curveOn != 0;
+            mMacroShape = std::clamp(curveShape, 0, MacroCurves::kNumShapes - 1);
+            mMacroRate  = std::clamp(curveRate, 0, MacroCurves::kNumRates - 1);
+            mMacroFreeMs = std::clamp(curveMs, MacroCurves::kFreeMinMs, MacroCurves::kFreeMaxMs);
         }
     } else {
         // v1 (old saves): folder + params only, no sample
@@ -924,6 +986,7 @@ void COMANCHE::resetPreset()
     for (int pi = 0; pi < kNumParams; pi++) mMacroLink[pi] = 0;
     setLoopEnabled(SoundClassifier::loops(mSampleType));
     resetLoopRegion();
+    mMacroCurveOn = false;
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }

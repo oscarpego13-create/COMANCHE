@@ -38,7 +38,8 @@ class ComanacheReverb
 {
 public:
     void prepare(double sampleRate);
-    void process(float* L, float* R, int numSamples, float amount, float decaySec);
+    // amount glides toward target per sample. keepRunning: keep the tail alive at 0, for a moving MACRO
+    void process(float* L, float* R, int numSamples, float& amount, float target, float glide, float decaySec, bool keepRunning);
 
 private:
     struct CombFilter {
@@ -88,6 +89,7 @@ struct EffectsParameters {
     float  lpFreq        { 20000.0f };
     float  outputVol     { 1.0f };
     float  macroModAmount{ 0.0f };
+    bool   keepRunning   { false };   // MACRO on a curve: reverb and chorus keep their state while at 0
     double bpm           { 120.0 };
 };
 
@@ -140,6 +142,10 @@ private:
     // Parameter smoothers — prevent zipper noise on rapid knob changes
     float mSmoothDistAmount{0.0f};
     float mSmoothVol{1.0f};          // output gain, glided per sample
+    // Mix amounts also glide per sample: held per block they step at every block edge, which clicks
+    // when the MACRO moves them quickly
+    float mSmoothReverb{0.0f}, mSmoothDelayMix{0.0f}, mSmoothFeedback{0.0f}, mSmoothChorus{0.0f};
+    float mixGlide{0.0f}, distGlide{0.0f};
     float volSmoothCoeff{0.0f};
     float mSmoothHpFreq{20.0f};
     float mSmoothLpFreq{20000.0f};

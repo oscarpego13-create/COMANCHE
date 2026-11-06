@@ -21,6 +21,7 @@ iplug_add_plugin(${PROJECT_NAME}
     SoundClassifier.h
     PresetManager.cpp
     PresetManager.h
+    MacroCurves.h
     resources/resource.h
   RESOURCES
     resources/fonts/Roboto-Mono-Regular.ttf
