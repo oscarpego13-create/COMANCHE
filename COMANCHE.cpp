@@ -694,6 +694,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
                 pos = chunk.Get(&v, pos);
                 if (std::isfinite(v)) mMacroDrawn.setPoint(i, v);
             }
+        mMacroDrawn.syncNodes();
     } else {
         // v1 (old saves): folder + params only, no sample
         if (!stringFits(pos)) return startPos;
@@ -971,6 +972,7 @@ void COMANCHE::loadSample(int idx)
     mMacroFreeMs  = std::clamp(savedOr(kPresetCurveMsKey, kDefaultCurveMs), MacroCurves::kFreeMinMs, MacroCurves::kFreeMaxMs);
     for (int i = 0; i < MacroCurves::DrawnCurve::kPoints; i++)
         mMacroDrawn.setPoint(i, savedOr(drawnPointKey(i).c_str(), MacroCurves::DrawnCurve::kFlat));
+    mMacroDrawn.syncNodes();
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
