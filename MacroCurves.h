@@ -40,10 +40,18 @@ namespace MacroCurves
     {
         static constexpr int kPoints = 128;
         static constexpr float kFlat = 0.5f;
+        // Drawing is coarse on purpose, so a mouse can do it: nodes along the cycle, and heights they
+        // snap to. Between nodes the curve joins them smoothly.
+        static constexpr int kNodes = 16, kLevels = 6, kPointsPerNode = kPoints / kNodes;
         DrawnCurve() { clear(); }
         void clear() { for (auto& p : mPoints) p.store(kFlat, std::memory_order_relaxed); }
         float point(int i) const { return mPoints[(size_t)(((i % kPoints) + kPoints) % kPoints)].load(std::memory_order_relaxed); }
         void setPoint(int i, float v) { mPoints[(size_t)(((i % kPoints) + kPoints) % kPoints)].store(std::clamp(v, 0.0f, 1.0f), std::memory_order_relaxed); }
+        void setNode(int node, float height) {
+            setPoint(node * kPointsPerNode, std::round(std::clamp(height, 0.0f, 1.0f) * kLevels) / kLevels);
+            for (int j = node - 2; j <= node + 1; j++) joinNodes(j);   // each join looks at its neighbours
+        }
+        float node(int i) const { return point(i * kPointsPerNode); }
         float at(float x) const {
             const float f = std::clamp(x, 0.0f, 1.0f) * kPoints;
             const int i = (int)f;
@@ -55,6 +63,15 @@ namespace MacroCurves
             return true;
         }
     private:
+        void joinNodes(int from) {
+            // Catmull-Rom: slopes carry through the nodes. Held between the two heights so it never overshoots.
+            const float p0 = node(from - 1), a = node(from), b = node(from + 1), p3 = node(from + 2);
+            for (int i = 1; i < kPointsPerNode; i++) {
+                const float t = (float)i / (float)kPointsPerNode;
+                const float v = 0.5f * (2.0f*a + (b - p0)*t + (2.0f*p0 - 5.0f*a + 4.0f*b - p3)*t*t + (3.0f*a - p0 - 3.0f*b + p3)*t*t*t);
+                setPoint(from * kPointsPerNode + i, std::clamp(v, std::min(a, b), std::max(a, b)));
+            }
+        }
         std::array<std::atomic<float>, kPoints> mPoints;
     };
 

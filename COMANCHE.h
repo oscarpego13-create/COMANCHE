@@ -892,18 +892,18 @@ public:
 private:
     void setOpen(bool open) { Hide(!open); if (mOnVisibility) mOnVisibility(); }
     void commit() { if (mChanged) mChanged(); SetDirty(false); }
-    // Fills every point the mouse passed over since the last event, so a fast stroke leaves no gaps.
-    // Past the last point the index wraps to the first: the end of the cycle is its start.
+    // Sets every node the mouse passed over since the last event, so a fast stroke leaves no gaps.
+    // Past the last node the index wraps to the first: the end of the cycle is its start.
     void drawAt(float x, float y) {
         using MacroCurves::DrawnCurve;
         const IRECT c = viewRect().GetPadded(-5.0f);
-        const int p = (int)std::lround(std::clamp((x - c.L) / c.W(), 0.0f, 1.0f) * DrawnCurve::kPoints);
+        const int n = (int)std::lround(std::clamp((x - c.L) / c.W(), 0.0f, 1.0f) * DrawnCurve::kNodes);
         const float v = std::clamp((c.B - y) / c.H(), 0.0f, 1.0f);
-        if (mLastPoint < 0) { mLastPoint = p; mLastValue = v; }
-        const int steps = std::abs(p - mLastPoint), dir = p >= mLastPoint ? 1 : -1;
+        if (mLastPoint < 0) { mLastPoint = n; mLastValue = v; }
+        const int steps = std::abs(n - mLastPoint), dir = n >= mLastPoint ? 1 : -1;
         for (int i = 0; i <= steps; i++)
-            mDrawn.setPoint(mLastPoint + i*dir, steps ? mLastValue + (v - mLastValue) * (float)i / (float)steps : v);
-        mLastPoint = p; mLastValue = v;
+            mDrawn.setNode(mLastPoint + i*dir, steps ? mLastValue + (v - mLastValue) * (float)i / (float)steps : v);
+        mLastPoint = n; mLastValue = v;
         SetDirty(false);
     }
     void drawCurve(IGraphics& g, const IRECT& r, int shape, const IColor& c, int segs, float thick) {
