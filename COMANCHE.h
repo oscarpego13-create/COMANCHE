@@ -1310,8 +1310,8 @@ public:
             }
         }
         // Wind streaks: appear and lengthen as the MACRO opens (deterministic pseudo-random layout)
-        if (mSmooth > 0.25f) {
-            const float a = (mSmooth - 0.25f) / 0.75f;
+        if (mRide > 0.25f) {
+            const float a = (mRide - 0.25f) / 0.75f;
             uint32_t seed = 23;
             auto rnd = [&seed]() { seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.0f; };
             const int n = (int)std::ceil(w / 22.0f);
@@ -1342,13 +1342,18 @@ private:
         const float shown = mMacroShown.load();
         const float m = shown >= 0.0f ? shown : (float)GetDelegate()->GetParam(kMacro)->GetNormalized();
         mSmooth += (1.0f - std::exp(-dt / 0.05f)) * (m - mSmooth);   // same 50 ms smoothing as the DSP
+        // The ride eases on its own, through two stages for an S-shaped change: it takes about half a
+        // second to settle, so a curve on the MACRO doesn't snap the horse between standstill and gallop
+        const float ease = 1.0f - std::exp(-dt / 0.12f);
+        mRideIn += ease * (m - mRideIn);
+        mRide   += ease * (mRideIn - mRide);
         static const Gait kGaits[3] = { {0.64f, 22.0f, 0.7f, 1.0f}, {0.42f, 34.0f, 1.2f, 1.6f}, {0.30f, 52.0f, 1.8f, 2.6f} };
         static const float lo[3] = {0.0f, 0.34f, 0.67f}, hi[3] = {0.34f, 0.67f, 1.0f};
         // Walk / trot / gallop bands with hysteresis, stride rate rising inside each band
-        if (mGait < 2 && mSmooth > hi[mGait] + 0.02f) mGait++;
-        else if (mGait > 0 && mSmooth < lo[mGait] - 0.02f) mGait--;
+        if (mGait < 2 && mRide > hi[mGait] + 0.02f) mGait++;
+        else if (mGait > 0 && mRide < lo[mGait] - 0.02f) mGait--;
         const Gait& gt = kGaits[mGait];
-        const float f = std::clamp((mSmooth - lo[mGait]) / (hi[mGait] - lo[mGait]), 0.0f, 1.0f);
+        const float f = std::clamp((mRide - lo[mGait]) / (hi[mGait] - lo[mGait]), 0.0f, 1.0f);
         const float sps = gt.spsLo + (gt.spsHi - gt.spsLo) * f;
         // Ground advances only when the frame changes, by what a planted hoof moves in one frame
         const int prev = (int)(mPhase * kN);
@@ -1362,7 +1367,7 @@ private:
     IBitmap mSheet;
     std::chrono::steady_clock::time_point mLast;
     const std::atomic<float>& mMacroShown;
-    float mSmooth{0.0f}, mPhase{0.0f}, mScroll{0.0f}, mWind{0.0f};
+    float mSmooth{0.0f}, mRideIn{0.0f}, mRide{0.0f}, mPhase{0.0f}, mScroll{0.0f}, mWind{0.0f};
     int mGait{0};
 };
 
