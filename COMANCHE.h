@@ -1431,8 +1431,14 @@ public:
     std::atomic<float> mGlideMs{80.0f};   // portamento between legato notes in mono + loop (settings only)
     // MACRO on a curve (right click on the MACRO). The knob's own value stays untouched underneath.
     std::atomic<bool>  mMacroCurveOn{false};
-    std::atomic<int>   mMacroShape{2}, mMacroRate{2};
-    std::atomic<float> mMacroFreeMs{500.0f};
+    static constexpr float kDefaultCurveShape = 2.0f, kDefaultCurveRate = 2.0f, kDefaultCurveMs = 500.0f;
+    static constexpr const char* kPresetCurveOnKey    = "CurveOn";   // per-sound preset entries
+    static constexpr const char* kPresetCurveShapeKey = "CurveShape";
+    static constexpr const char* kPresetCurveRateKey  = "CurveRate";
+    static constexpr const char* kPresetCurveMsKey    = "CurveMs";
+    std::atomic<int>   mMacroShape{(int)kDefaultCurveShape}, mMacroRate{(int)kDefaultCurveRate};
+    std::atomic<float> mMacroFreeMs{kDefaultCurveMs};
+    void resetMacroCurve();
     std::atomic<float> mMacroShown{-1.0f};   // where the curve has it now, < 0 when it isn't on a curve
     std::atomic<float> mMacroPhase{0.0f};
     double mMacroPhaseRun{0.0};

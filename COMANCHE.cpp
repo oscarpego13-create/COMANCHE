@@ -663,7 +663,7 @@ int COMANCHE::UnserializeState(const IByteChunk& chunk, int pos)
             if (manual) setLoopRegion(zoneStart, zoneEnd, true);
         }
         if (magic == kSerializeMagic) {
-            int curveOn = 0, curveShape = 2, curveRate = 2; float curveMs = 500.0f;
+            int curveOn = 0, curveShape = (int)kDefaultCurveShape, curveRate = (int)kDefaultCurveRate; float curveMs = kDefaultCurveMs;
             pos = chunk.Get(&curveOn, pos);
             pos = chunk.Get(&curveShape, pos);
             pos = chunk.Get(&curveRate, pos);
@@ -938,6 +938,15 @@ void COMANCHE::loadSample(int idx)
     setLoopEnabled(loopIt != saved.end() ? loopIt->second > 0.5f : SoundClassifier::loops(mSampleType));
     const auto zoneStart = saved.find(kPresetLoopStartKey), zoneEnd = saved.find(kPresetLoopEndKey);
     if (zoneStart != saved.end() && zoneEnd != saved.end()) setLoopRegion(zoneStart->second, zoneEnd->second, true);
+    // MACRO curve: from this sound's preset; without one it starts off, like the knobs start at 0
+    auto savedOr = [&saved](const char* key, float fallback) {
+        const auto it = saved.find(key);
+        return it != saved.end() ? it->second : fallback;
+    };
+    mMacroCurveOn = savedOr(kPresetCurveOnKey, 0.0f) > 0.5f;
+    mMacroShape   = std::clamp((int)savedOr(kPresetCurveShapeKey, kDefaultCurveShape), 0, MacroCurves::kNumShapes - 1);
+    mMacroRate    = std::clamp((int)savedOr(kPresetCurveRateKey, kDefaultCurveRate), 0, MacroCurves::kNumRates - 1);
+    mMacroFreeMs  = std::clamp(savedOr(kPresetCurveMsKey, kDefaultCurveMs), MacroCurves::kFreeMinMs, MacroCurves::kFreeMaxMs);
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
@@ -951,6 +960,10 @@ void COMANCHE::savePreset()
     }
     vals[kPresetLoopKey] = mLoopEnabled ? 1.0f : 0.0f;
     if (mLoopManual) { vals[kPresetLoopStartKey] = mLoopStartN.load(); vals[kPresetLoopEndKey] = mLoopEndN.load(); }
+    vals[kPresetCurveOnKey]    = mMacroCurveOn ? 1.0f : 0.0f;
+    vals[kPresetCurveShapeKey] = (float)mMacroShape.load();
+    vals[kPresetCurveRateKey]  = (float)mMacroRate.load();
+    vals[kPresetCurveMsKey]    = mMacroFreeMs.load();
     mPresets.save(vals);
 }
 
@@ -975,8 +988,17 @@ void COMANCHE::resetPresetForSample(int idx)
             setParamFromUI(pi, GetParam(pi)->GetDefault(true));
         setLoopEnabled(SoundClassifier::loops(mSampleType));
         resetLoopRegion();
+        resetMacroCurve();
         if (GetUI()) GetUI()->SetAllControlsDirty();
     }
+}
+
+void COMANCHE::resetMacroCurve()
+{
+    mMacroCurveOn = false;
+    mMacroShape   = (int)kDefaultCurveShape;
+    mMacroRate    = (int)kDefaultCurveRate;
+    mMacroFreeMs  = kDefaultCurveMs;
 }
 
 void COMANCHE::resetPreset()
@@ -986,7 +1008,7 @@ void COMANCHE::resetPreset()
     for (int pi = 0; pi < kNumParams; pi++) mMacroLink[pi] = 0;
     setLoopEnabled(SoundClassifier::loops(mSampleType));
     resetLoopRegion();
-    mMacroCurveOn = false;
+    resetMacroCurve();
     markStateDirty();
     if (GetUI()) GetUI()->SetAllControlsDirty();
 }
